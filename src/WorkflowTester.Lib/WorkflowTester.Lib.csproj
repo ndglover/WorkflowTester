@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>WorkflowTester.Lib</PackageId>
+    <Description>Scratch library used to test trusted-publishing GitHub Actions workflows for NuGet.</Description>
+  </PropertyGroup>
+
+</Project>
