@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "pull-request-title-pattern": "chore(dotnet): release${component} ${version}",
+  "packages": {
+    "src/WorkflowTester.Lib": {
+      "release-type": "simple",
+      "component": "dotnet",
+      "tag-separator": "/",
+      "extra-files": ["WorkflowTester.Lib.csproj"]
+    }
+  }
+}
