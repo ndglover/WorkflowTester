@@ -12,16 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Builds and publishes WorkflowTester.Lib once release-please.yml (release-please)
-# has cut a dotnet/v* tag. Packing has no secrets; publishing only runs after
+# Builds WorkflowTester.Lib from the commit supplied by Release Please.
+# Uploads to its draft release, then publishes it. Publishing only runs after
 # approval on the nuget-release environment and authenticates to nuget.org via
 # short-lived OIDC-issued trusted publishing, never a stored API key.
 name: Release
 
 on:
-  push:
-    tags:
-      - 'dotnet/v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag name of the existing draft release, e.g. dotnet/v0.0.5'
+        required: true
+        type: string
+      release_sha:
+        description: 'Full commit SHA to pack, supplied by Release Please'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -32,8 +43,19 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Verify draft release
+        run: |
+          [[ "$RELEASE_TAG" =~ ^dotnet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.release_sha }}
           submodules: true
           persist-credentials: false
 
@@ -41,7 +63,13 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - run: dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o artifacts -p:VersionSuffix=
+      - name: Pack matching release version
+        run: |
+          version=$(dotnet msbuild src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -getProperty:VersionPrefix)
+          test "$version" = "${RELEASE_TAG#dotnet/v}"
+          dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o artifacts -p:VersionSuffix=
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -77,7 +105,15 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
 
-      # release-please already created the GitHub release for this tag; attach the package to it.
-      - run: gh release upload "${GITHUB_REF_NAME}" artifacts/*.nupkg --repo "${GITHUB_REPOSITORY}"
+      # The release stays editable until every package asset is attached.
+      - name: Attach package to draft release
+        run: gh release upload "$RELEASE_TAG" artifacts/*.nupkg --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+
+      - name: Publish immutable release
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}

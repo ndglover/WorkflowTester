@@ -4,6 +4,7 @@
   "packages": {
     "src/WorkflowTester.Lib": {
       "release-type": "simple",
+      "draft": true,
       "component": "dotnet",
       "tag-separator": "/",
       "extra-files": ["WorkflowTester.Lib.csproj"]

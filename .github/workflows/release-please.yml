@@ -13,8 +13,8 @@
 # limitations under the License.
 
 # Watches conventional-commit pushes to main and maintains a release PR for
-# WorkflowTester.Lib. Merging that PR is what creates the dotnet/v* tag
-# and GitHub release that release.yml then builds and publishes.
+# WorkflowTester.Lib. Merging it creates a draft GitHub release.
+# Dispatch the package workflow explicitly: a draft has no Git tag yet.
 name: Release Please
 
 on:
@@ -38,9 +38,21 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        id: release
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Start draft release publishing
+        if: ${{ steps.release.outputs['src/WorkflowTester.Lib--release_created'] == 'true' }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f release_tag="$RELEASE_TAG" -f release_sha="$RELEASE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs['src/WorkflowTester.Lib--tag_name'] }}
+          RELEASE_SHA: ${{ steps.release.outputs['src/WorkflowTester.Lib--sha'] }}
