@@ -12,8 +12,8 @@ WorkflowTester now tests the proposed fix for Snowflake's release workflow.
 ## Required setup
 
 - Keep release immutability enabled.
-- Allow GitHub Actions to create pull requests in repository settings.
-- The Release Please workflow uses the built-in GitHub token with contents, pull requests, and actions write permissions. Workflow dispatch is permitted with this token; a separate Release Please PAT is not required for this sequence.
+- Configure the repository Actions secret `RELEASE_PLEASE_TOKEN` for Release Please. Scope it to this repository with Contents and Pull requests write access. The repository setting allowing the built-in Actions token to create/approve PRs can remain disabled.
+- Release Please uses the separate token to manage release PRs and draft releases, matching Snowflake. The built-in GitHub token only has Contents read and Actions write for explicitly dispatching `release.yml`; it is not granted Pull requests write.
 - Keep `NUGET_USER`, the `nuget-release` environment approval gate, and the NuGet Trusted Publishing policy for `release.yml`. The publishing workflow runs on `main` via dispatch, so any environment branch restrictions must allow `main`.
 - The policy must allow the existing workflow/environment combination to authenticate when dispatched from `main`.
 
