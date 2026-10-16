@@ -5,8 +5,8 @@ WorkflowTester now tests the proposed fix for Snowflake's release workflow.
 1. Release Please maintains a version/changelog PR.
 2. After the PR is merged, it creates a **draft** GitHub release (`draft: true`).
 3. The action explicitly dispatches `release.yml` with the release tag name and full commit SHA. Draft creation does not create a Git tag, so a tag-push trigger would not work.
-4. The publishing workflow verifies the draft exists, checks out that SHA, checks its package version matches the intended tag, and packs the library.
-5. After `nuget-release` environment approval, it attests and pushes the package to NuGet.org.
+4. The build job validates the inputs, checks out that SHA, checks its package version matches the intended tag, and packs the library with read-only permissions.
+5. After `nuget-release` environment approval, the write-enabled publishing job verifies the release is still a draft, then attests and pushes the package to NuGet.org. Draft visibility requires push access, so draft lookup must not run in the read-only build job.
 6. It uploads the `.nupkg` to the draft, then publishes the GitHub release. Publication creates the tag and freezes the attached asset under release immutability.
 
 ## Required setup
