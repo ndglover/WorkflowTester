@@ -1,0 +1,56 @@
+name: Verify release retry recovery
+'on':
+  workflow_run:
+    workflows:
+    - Release
+    types:
+    - completed
+permissions:
+  contents: read
+  actions: write
+jobs:
+  verify:
+    if: '${{ github.event.workflow_run.head_branch == ''main'' && github.event.workflow_run.head_repository.full_name
+      == github.repository && startsWith(github.event.workflow_run.display_title,
+      ''Retry recovery: dotnet/v0.1.1'') }}'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Retry intentional failures or verify final recovery
+      run: "gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/attempts/$TEST_ATTEMPT/jobs?per_page=100\"\
+        \ > attempt-jobs.json\nif [[ \"$TEST_CONCLUSION\" == failure ]]; then\n  test\
+        \ \"$TEST_ATTEMPT\" -lt 5\n  jq -e 'any(.jobs[].steps[]?; .name == \"Inject\
+        \ retry-test failure\" and .conclusion == \"failure\")' attempt-jobs.json\n\
+        \  gh api --method POST \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/rerun-failed-jobs\"\
+        \n  printf 'Requested **Re-run failed jobs** after intentional failure in\
+        \ attempt %s.\\n' \"$TEST_ATTEMPT\" >> \"$GITHUB_STEP_SUMMARY\"\nelse\n  test\
+        \ \"$TEST_CONCLUSION\" = success\n  test \"$TEST_ATTEMPT\" -eq 5\n  gh api\
+        \ \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/jobs?filter=all&per_page=100\"\
+        \ --paginate --slurp > all-jobs.json\n  test \"$(jq '[.[].jobs[] | .steps[]?\
+        \ | select(.name == \"Inject retry-test failure\" and .conclusion == \"failure\"\
+        )] | length' all-jobs.json)\" -eq 4\n  for entry in 'Build package:2' 'Publish\
+        \ NuGet package:3' 'Attach package to GitHub release:4' 'Publish GitHub release:5';\
+        \ do\n    name=\"${entry%:*}\"\n    attempt=\"${entry##*:}\"\n    jq -e --arg\
+        \ name \"$name\" --argjson attempt \"$attempt\" '\n      [.[].jobs[] | select(.name\
+        \ == $name and .conclusion == \"success\")] | unique_by(.id)\n      | length\
+        \ == 1 and .[0].run_attempt == $attempt\n    ' all-jobs.json\n  done\n  for\
+        \ step in 'Push package to NuGet' 'Attach package to draft release' 'Publish\
+        \ immutable release'; do\n    test \"$(jq --arg step \"$step\" '[.[].jobs[]\
+        \ | .steps[]? | select(.name == $step and .conclusion == \"success\")] | length'\
+        \ all-jobs.json)\" -eq 1\n  done\n  test \"$(gh release view dotnet/v0.1.1\
+        \ --repo \"$GITHUB_REPOSITORY\" --json isDraft --jq .isDraft)\" = false\n\
+        \  test \"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/dotnet%2Fv0.1.1\"\
+        \ --jq .immutable)\" = true\n  printf '## Retry recovery verified\\n\\nFour\
+        \ intentional failures recovered across five attempts. Each job succeeded\
+        \ once, on attempts 2, 3, 4, and 5 respectively. NuGet push, asset upload,\
+        \ and GitHub publication each succeeded exactly once. The final release is\
+        \ immutable.\\n' >> \"$GITHUB_STEP_SUMMARY\"\nfi\n"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TEST_RUN_ID: ${{ github.event.workflow_run.id }}
+        TEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        TEST_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: retry-attempt-${{ github.event.workflow_run.run_attempt }}
+        path: '*-jobs.json'

@@ -1,0 +1,24 @@
+name: Start release retry test
+'on':
+  push:
+    branches:
+    - main
+    paths:
+    - .github/workflows/start-release-retry-test.yml
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  actions: write
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Create test draft and dispatch release
+      run: "gh release create dotnet/v0.1.1 --repo \"$GITHUB_REPOSITORY\" --draft\
+        \ --target \"$GITHUB_SHA\" \\\n  --title 'Workflow retry verification 0.1.1'\
+        \ \\\n  --notes 'Controlled retry test of build, NuGet push, asset attachment,\
+        \ and release publication.'\ngh workflow run release.yml --repo \"$GITHUB_REPOSITORY\"\
+        \ --ref main \\\n  -f release_tag=dotnet/v0.1.1 -f release_sha=\"$GITHUB_SHA\"\
+        \ -f exercise_retries=true\n"
+      env:
+        GH_TOKEN: ${{ github.token }}

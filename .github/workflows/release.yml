@@ -1,80 +1,83 @@
-# Copyright (c) 2026 ADBC Drivers Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#         http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# Builds WorkflowTester.Lib from the commit supplied by Release Please.
-# Uploads to its draft release, then publishes it. Publishing only runs after
-# approval on the nuget-release environment and authenticates to nuget.org via
-# short-lived OIDC-issued trusted publishing, never a stored API key.
 name: Release
-
-on:
+'on':
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag name of the existing draft release, e.g. dotnet/v0.0.5'
-        required: true
+        description: Tag name of the existing draft release, e.g. dotnet/v1.0.1
+        required: 'true'
         type: string
       release_sha:
-        description: 'Full commit SHA to pack, supplied by Release Please'
-        required: true
+        description: Full commit SHA to pack, supplied by Release Please
+        required: 'true'
         type: string
-
+      exercise_retries:
+        description: 'TEST ONLY: inject failures across attempts 1-4'
+        type: boolean
+        default: false
 concurrency:
   group: release-${{ inputs.release_tag }}
-  cancel-in-progress: false
-
+  cancel-in-progress: 'false'
 permissions:
   contents: read
-
 jobs:
   pack:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.package.outputs.source_sha }}
     permissions:
       contents: read
     steps:
-      - name: Validate release inputs
-        run: |
-          [[ "$RELEASE_TAG" =~ ^dotnet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
+    - name: Inject retry-test failure
+      if: ${{ inputs.exercise_retries && github.run_attempt == 1 }}
+      run: 'echo "::error::Intentional retry test: pack, attempt 1"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.release_sha }}
-          submodules: true
-          persist-credentials: false
+        exit 1
 
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        with:
-          dotnet-version: '8.0.x'
+        '
+    - name: Validate release inputs
+      run: '[[ "$RELEASE_TAG" =~ ^dotnet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
-      - name: Pack matching release version
-        run: |
-          version=$(dotnet msbuild src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -getProperty:VersionPrefix)
-          test "$version" = "${RELEASE_TAG#dotnet/v}"
-          dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o artifacts -p:VersionSuffix=
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+        [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: nuget-package
-          path: artifacts/*.nupkg
+        '
+      env:
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_SHA: ${{ inputs.release_sha }}
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ inputs.release_sha }}
+        submodules: 'true'
+        persist-credentials: 'false'
+    - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+      with:
+        dotnet-version: 8.0.x
+    - name: Pack matching release version
+      id: package
+      run: 'source_sha=$(git rev-parse HEAD)
 
-  publish:
+        test "$source_sha" = "$RELEASE_SHA"
+
+        version=$(dotnet msbuild src/WorkflowTester.Lib/WorkflowTester.Lib.csproj
+        -getProperty:VersionPrefix)
+
+        test "$version" = "${RELEASE_TAG#dotnet/v}"
+
+        dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o
+        artifacts -p:VersionSuffix=
+
+        echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+        '
+      env:
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_SHA: ${{ inputs.release_sha }}
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nuget-package
+        path: artifacts/*.nupkg
+    name: Build package
+  publish_nuget:
+    name: Publish NuGet package
     needs: pack
     runs-on: ubuntu-latest
     environment: nuget-release
@@ -83,43 +86,115 @@ jobs:
       contents: write
       attestations: write
     steps:
-      # Draft releases require push access to see; keep this in the write-enabled job.
-      - name: Verify draft release
-        run: |
-          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+    - name: Inject retry-test failure
+      if: ${{ inputs.exercise_retries && github.run_attempt == 2 }}
+      run: 'echo "::error::Intentional retry test: publish_nuget, attempt 2"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: nuget-package
-          path: artifacts
+        exit 1
 
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-path: 'artifacts/*.nupkg'
+        '
+    - name: Verify draft release and source commit
+      run: "release_info=$(gh release view \"$RELEASE_TAG\" --repo \"$GITHUB_REPOSITORY\"\
+        \ \\\n  --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish]\
+        \ | @tsv')\nIFS=$'\\t' read -r is_draft target_commit <<< \"$release_info\"\
+        \nif [[ \"$is_draft\" != true ]]; then\n  echo \"::error::The GitHub release\
+        \ must still be a draft.\"\n  exit 1\nfi\nif [[ \"$target_commit\" != \"$RELEASE_SHA\"\
+        \ ]]; then\n  echo \"::error::The draft release targetCommitish does not match\
+        \ release_sha.\"\n  exit 1\nfi\nif [[ \"$BUILT_SHA\" != \"$RELEASE_SHA\" ]];\
+        \ then\n  echo \"::error::The package build commit does not match release_sha.\"\
+        \n  exit 1\nfi\n"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_SHA: ${{ inputs.release_sha }}
+        BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: nuget-package
+        path: artifacts
+    - uses: actions/attest-build-provenance/predicate@1176ef556905f349f669722abf30bce1a6e16e01
+      id: workflow_provenance
+    - name: Record actual package source in provenance
+      run: "test \"$BUILT_SHA\" = \"$RELEASE_SHA\"\njq --arg source_sha \"$BUILT_SHA\"\
+        \ \\\n  --arg source_uri \"git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$BUILT_SHA\"\
+        \ \\\n  --arg release_tag \"$RELEASE_TAG\" '\n    .buildDefinition.externalParameters.release\
+        \ = {\n      tag: $release_tag,\n      source: {uri: $source_uri, digest:\
+        \ {gitCommit: $source_sha}}\n    }\n    | .buildDefinition.resolvedDependencies\
+        \ |= map(. + {name: \"workflow\"})\n    | .buildDefinition.resolvedDependencies\
+        \ += [{\n        name: \"release-source\", uri: $source_uri, digest: {gitCommit:\
+        \ $source_sha}\n      }]\n  ' <<< \"$WORKFLOW_PREDICATE\" > artifacts/release-provenance.json\n"
+      env:
+        WORKFLOW_PREDICATE: ${{ steps.workflow_provenance.outputs.predicate }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_SHA: ${{ inputs.release_sha }}
+        BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+    - uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc
+      id: release_provenance
+      with:
+        subject-path: artifacts/*.nupkg
+        predicate-type: https://slsa.dev/provenance/v1
+        predicate-path: artifacts/release-provenance.json
+    - name: Verify attested package source
+      run: "jq -r '.dsseEnvelope.payload' \"$BUNDLE_PATH\" | base64 --decode \\\n\
+        \  | jq -e --arg sha \"$BUILT_SHA\" \\\n      --arg uri \"git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$BUILT_SHA\"\
+        \ '\n      .predicateType == \"https://slsa.dev/provenance/v1\"\n      and\
+        \ .predicate.buildDefinition.externalParameters.release.source.digest.gitCommit\
+        \ == $sha\n      and any(.predicate.buildDefinition.resolvedDependencies[];\n\
+        \        .name == \"release-source\" and .uri == $uri and .digest.gitCommit\
+        \ == $sha)\n    ' > /dev/null\n"
+      env:
+        BUNDLE_PATH: ${{ steps.release_provenance.outputs.bundle-path }}
+        BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+    - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841
+      id: nuget-login
+      with:
+        user: ${{ vars.NUGET_USER }}
+    - run: dotnet nuget push "artifacts/*.nupkg" --api-key "$NUGET_API_KEY" --source
+        https://api.nuget.org/v3/index.json
+      env:
+        NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+      name: Push package to NuGet
+  attach_package:
+    name: Attach package to GitHub release
+    needs: publish_nuget
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Inject retry-test failure
+      if: ${{ inputs.exercise_retries && github.run_attempt == 3 }}
+      run: 'echo "::error::Intentional retry test: attach_package, attempt 3"
 
-      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
-        id: nuget-login
-        with:
-          # Individual NuGet username that created the Trusted Publishing policy.
-          # Package ownership is selected separately in that policy.
-          user: ${{ vars.NUGET_USER }}
+        exit 1
 
-      - run: dotnet nuget push "artifacts/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
-        env:
-          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        '
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: nuget-package
+        path: artifacts
+    - name: Attach package to draft release
+      run: gh release upload "$RELEASE_TAG" artifacts/*.nupkg --repo "$GITHUB_REPOSITORY"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+  publish_release:
+    name: Publish GitHub release
+    needs: attach_package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Inject retry-test failure
+      if: ${{ inputs.exercise_retries && github.run_attempt == 4 }}
+      run: 'echo "::error::Intentional retry test: publish_release, attempt 4"
 
-      # The release stays editable until every package asset is attached.
-      - name: Attach package to draft release
-        run: gh release upload "$RELEASE_TAG" artifacts/*.nupkg --repo "$GITHUB_REPOSITORY"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+        exit 1
 
-      - name: Publish immutable release
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+        '
+    - name: Publish immutable release
+      run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+run-name: '${{ inputs.exercise_retries && format(''Retry recovery: {0}'', inputs.release_tag)
+  || format(''Release {0}'', inputs.release_tag) }}'
