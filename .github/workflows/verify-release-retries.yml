@@ -3,20 +3,38 @@ name: Verify release retry recovery
   workflow_run:
     workflows:
     - Release
+    - 'Retry recovery: dotnet/v0.1.1'
     types:
     - completed
+  push:
+    branches:
+    - main
+    paths:
+    - .github/workflows/verify-release-retries.yml
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Controlled retry test run ID
+        required: true
+        type: string
+        default: '39046960369'
 permissions:
   contents: read
   actions: write
 jobs:
   verify:
-    if: '${{ github.event.workflow_run.head_branch == ''main'' && github.event.workflow_run.head_repository.full_name
-      == github.repository && startsWith(github.event.workflow_run.display_title,
-      ''Retry recovery: dotnet/v0.1.1'') }}'
+    if: '${{ github.event_name != ''workflow_run'' || (github.event.workflow_run.head_branch
+      == ''main'' && github.event.workflow_run.head_repository.full_name == github.repository
+      && startsWith(github.event.workflow_run.display_title, ''Retry recovery: dotnet/v0.1.1''))
+      }}'
     runs-on: ubuntu-latest
     steps:
     - name: Retry intentional failures or verify final recovery
-      run: "gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/attempts/$TEST_ATTEMPT/jobs?per_page=100\"\
+      run: "gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID\" > test-run.json\n\
+        test \"$(jq -r .head_branch test-run.json)\" = main\ntest \"$(jq -r .display_title\
+        \ test-run.json)\" = 'Retry recovery: dotnet/v0.1.1'\nTEST_ATTEMPT=$(jq -r\
+        \ .run_attempt test-run.json)\nTEST_CONCLUSION=$(jq -r .conclusion test-run.json)\n\
+        gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/attempts/$TEST_ATTEMPT/jobs?per_page=100\"\
         \ > attempt-jobs.json\nif [[ \"$TEST_CONCLUSION\" == failure ]]; then\n  test\
         \ \"$TEST_ATTEMPT\" -lt 5\n  jq -e 'any(.jobs[].steps[]?; .name == \"Inject\
         \ retry-test failure\" and .conclusion == \"failure\")' attempt-jobs.json\n\
@@ -46,9 +64,8 @@ jobs:
         \ immutable.\\n' >> \"$GITHUB_STEP_SUMMARY\"\nfi\n"
       env:
         GH_TOKEN: ${{ github.token }}
-        TEST_RUN_ID: ${{ github.event.workflow_run.id }}
-        TEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-        TEST_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        TEST_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id || '39046960369'
+          }}
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
