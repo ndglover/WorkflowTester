@@ -30,19 +30,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Retry intentional failures or verify final recovery
-      run: "gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID\" > test-run.json\n\
-        test \"$(jq -r .head_branch test-run.json)\" = main\ntest \"$(jq -r .display_title\
-        \ test-run.json)\" = 'Retry recovery: dotnet/v0.1.1'\nTEST_ATTEMPT=$(jq -r\
-        \ .run_attempt test-run.json)\nTEST_CONCLUSION=$(jq -r .conclusion test-run.json)\n\
-        gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/attempts/$TEST_ATTEMPT/jobs?per_page=100\"\
-        \ > attempt-jobs.json\nif [[ \"$TEST_CONCLUSION\" == failure ]]; then\n  test\
-        \ \"$TEST_ATTEMPT\" -lt 5\n  jq -e 'any(.jobs[].steps[]?; .name == \"Inject\
-        \ retry-test failure\" and .conclusion == \"failure\")' attempt-jobs.json\n\
-        \  gh api --method POST \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/rerun-failed-jobs\"\
-        \n  printf 'Requested **Re-run failed jobs** after intentional failure in\
-        \ attempt %s.\\n' \"$TEST_ATTEMPT\" >> \"$GITHUB_STEP_SUMMARY\"\nelse\n  test\
-        \ \"$TEST_CONCLUSION\" = success\n  test \"$TEST_ATTEMPT\" -eq 5\n  gh api\
-        \ \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/jobs?filter=all&per_page=100\"\
+      run: "finished=false\nfor poll in {1..30}; do\n  gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID?retry_check=$GITHUB_RUN_ID-$poll\"\
+        \ > test-run.json\n  test \"$(jq -r .head_branch test-run.json)\" = main\n\
+        \  test \"$(jq -r .display_title test-run.json)\" = 'Retry recovery: dotnet/v0.1.1'\n\
+        \  TEST_ATTEMPT=$(jq -r .run_attempt test-run.json)\n  TEST_CONCLUSION=$(jq\
+        \ -r .conclusion test-run.json)\n  if [[ \"$(jq -r .status test-run.json)\"\
+        \ != completed ]]; then\n    sleep 10\n    continue\n  fi\n  gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/attempts/$TEST_ATTEMPT/jobs?per_page=100\"\
+        \ > attempt-jobs.json\n  if [[ \"$TEST_CONCLUSION\" == failure ]]; then\n\
+        \    test \"$TEST_ATTEMPT\" -lt 5\n    jq -e 'any(.jobs[].steps[]?; .name\
+        \ == \"Inject retry-test failure\" and .conclusion == \"failure\")' attempt-jobs.json\n\
+        \    gh api --method POST \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/rerun-failed-jobs\"\
+        \n    printf 'Requested **Re-run failed jobs** after intentional failure in\
+        \ attempt %s.\\n' \"$TEST_ATTEMPT\" >> \"$GITHUB_STEP_SUMMARY\"\n    sleep\
+        \ 10\n    continue\n  fi\n  test \"$TEST_CONCLUSION\" = success\n  test \"\
+        $TEST_ATTEMPT\" -eq 5\n  gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$TEST_RUN_ID/jobs?filter=all&per_page=100\"\
         \ --paginate --slurp > all-jobs.json\n  test \"$(jq '[.[].jobs[] | .steps[]?\
         \ | select(.name == \"Inject retry-test failure\" and .conclusion == \"failure\"\
         )] | length' all-jobs.json)\" -eq 4\n  for entry in 'Build package:2' 'Publish\
@@ -62,7 +63,8 @@ jobs:
         \ intentional failures recovered across five attempts. Each job succeeded\
         \ once, on attempts 2, 3, 4, and 5 respectively. NuGet push, asset upload,\
         \ and GitHub publication each succeeded exactly once. The final release is\
-        \ immutable.\\n' >> \"$GITHUB_STEP_SUMMARY\"\nfi\n"
+        \ immutable.\\n' >> \"$GITHUB_STEP_SUMMARY\"\n  finished=true\n  break\ndone\n\
+        test \"$finished\" = true\n"
       env:
         GH_TOKEN: ${{ github.token }}
         TEST_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id || '39046960369'
