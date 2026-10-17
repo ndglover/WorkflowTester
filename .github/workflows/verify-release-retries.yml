@@ -1,3 +1,4 @@
+# Continue the controlled retry exercise after attempt 2.
 name: Verify release retry recovery
 'on':
   workflow_run:
