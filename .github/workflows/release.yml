@@ -4,11 +4,11 @@ name: Release
     inputs:
       release_tag:
         description: Tag name of the existing draft release, e.g. dotnet/v1.0.1
-        required: 'true'
+        required: true
         type: string
       release_sha:
         description: Full commit SHA to pack, supplied by Release Please
-        required: 'true'
+        required: true
         type: string
       exercise_retries:
         description: 'TEST ONLY: inject failures across attempts 1-4'
@@ -16,7 +16,7 @@ name: Release
         default: false
 concurrency:
   group: release-${{ inputs.release_tag }}
-  cancel-in-progress: 'false'
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
