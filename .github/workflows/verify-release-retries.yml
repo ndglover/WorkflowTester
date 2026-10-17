@@ -1,4 +1,3 @@
-# Continue the controlled retry exercise after attempt 2.
 name: Verify release retry recovery
 'on':
   workflow_run:
@@ -50,14 +49,15 @@ jobs:
         \ NuGet package:3' 'Attach package to GitHub release:4' 'Publish GitHub release:5';\
         \ do\n    name=\"${entry%:*}\"\n    attempt=\"${entry##*:}\"\n    jq -e --arg\
         \ name \"$name\" --argjson attempt \"$attempt\" '\n      [.[].jobs[] | select(.name\
-        \ == $name and .conclusion == \"success\")] | unique_by(.id)\n      | length\
-        \ == 1 and .[0].run_attempt == $attempt\n    ' all-jobs.json\n  done\n  for\
-        \ step in 'Push package to NuGet' 'Attach package to draft release' 'Publish\
-        \ immutable release'; do\n    test \"$(jq --arg step \"$step\" '[.[].jobs[]\
-        \ | .steps[]? | select(.name == $step and .conclusion == \"success\")] | length'\
-        \ all-jobs.json)\" -eq 1\n  done\n  test \"$(gh release view dotnet/v0.1.1\
-        \ --repo \"$GITHUB_REPOSITORY\" --json isDraft --jq .isDraft)\" = false\n\
-        \  test \"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/dotnet%2Fv0.1.1\"\
+        \ == $name and .conclusion == \"success\")] | group_by([.name, .started_at,\
+        \ .completed_at])\n      | length == 1 and (.[0] | map(.run_attempt) | min)\
+        \ == $attempt\n    ' all-jobs.json\n  done\n  for step in 'Push package to\
+        \ NuGet' 'Attach package to draft release' 'Publish immutable release'; do\n\
+        \    test \"$(jq --arg step \"$step\" '[.[].jobs[] | .steps[]? | select(.name\
+        \ == $step and .conclusion == \"success\")] | unique_by([.name, .started_at,\
+        \ .completed_at]) | length' all-jobs.json)\" -eq 1\n  done\n  test \"$(gh\
+        \ release view dotnet/v0.1.1 --repo \"$GITHUB_REPOSITORY\" --json isDraft\
+        \ --jq .isDraft)\" = false\n  test \"$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/dotnet%2Fv0.1.1\"\
         \ --jq .immutable)\" = true\n  printf '## Retry recovery verified\\n\\nFour\
         \ intentional failures recovered across five attempts. Each job succeeded\
         \ once, on attempts 2, 3, 4, and 5 respectively. NuGet push, asset upload,\
