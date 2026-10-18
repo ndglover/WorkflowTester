@@ -13,8 +13,8 @@
 # limitations under the License.
 
 # Builds WorkflowTester.Lib from the commit supplied by Release Please.
-# Uploads to its draft release, then publishes it. Publishing only runs after
-# approval on the nuget-release environment and authenticates to nuget.org via
+# Stages the package and provenance on the draft before approval.
+# Publishing uses that same candidate after approval on the nuget-release environment and authenticates to nuget.org via
 # short-lived OIDC-issued trusted publishing, never a stored API key.
 name: Release
 
@@ -29,6 +29,10 @@ on:
         description: 'Full commit SHA to pack, supplied by Release Please'
         required: true
         type: string
+      publish:
+        description: 'Publish after approval; disable to prepare a downloadable candidate only'
+        type: boolean
+        default: true
 
 concurrency:
   group: release-${{ inputs.release_tag }}
@@ -39,6 +43,7 @@ permissions:
 
 jobs:
   pack:
+    name: Build release candidate
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.package.outputs.source_sha }}
@@ -80,15 +85,18 @@ jobs:
         with:
           name: nuget-package
           path: artifacts/*.nupkg
+          if-no-files-found: error
 
-  publish_nuget:
-    name: Publish NuGet package
+  prepare_candidate:
+    name: Prepare downloadable candidate
     needs: pack
     runs-on: ubuntu-latest
-    environment: nuget-release
+    outputs:
+      package_name: ${{ steps.candidate.outputs.package_name }}
+      package_sha256: ${{ steps.candidate.outputs.package_sha256 }}
     permissions:
-      id-token: write
       contents: write
+      id-token: write
       attestations: write
     steps:
       # Draft releases require push access to see; keep this in the write-enabled job.
@@ -194,6 +202,129 @@ jobs:
           BUNDLE_PATH: ${{ steps.release_provenance.outputs.bundle-path }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
+      - name: Attach candidate and provenance to draft
+        id: candidate
+        run: |
+          packages=(artifacts/*.nupkg)
+          test "${#packages[@]}" -eq 1
+          test -f "${packages[0]}"
+          package_name=${packages[0]##*/}
+          package_sha256=$(sha256sum "${packages[0]}" | cut -d ' ' -f 1)
+          cp "$BUNDLE_PATH" artifacts/release-attestation.sigstore.json
+          gh release upload "$RELEASE_TAG" "${packages[0]}" \
+            artifacts/release-attestation.sigstore.json --clobber --repo "$GITHUB_REPOSITORY"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "package_sha256=$package_sha256" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUNDLE_PATH: ${{ steps.release_provenance.outputs.bundle-path }}
+
+      - name: Verify downloadable candidate and show review details
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$PACKAGE_NAME" --pattern release-attestation.sigstore.json --dir staged
+          printf '%s  %s\n' "$PACKAGE_SHA256" "staged/$PACKAGE_NAME" | sha256sum --check
+          gh attestation verify "staged/$PACKAGE_NAME" --repo "$GITHUB_REPOSITORY" \
+            --bundle staged/release-attestation.sigstore.json \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          release_url=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          {
+            printf '### Release candidate ready\n\n'
+            printf '[Download and test the draft candidate](%s) before approving NuGet publication.\n\n' "$release_url"
+            printf -- '- Package: `%s`\n- Source commit: `%s`\n- SHA-256: `%s`\n' "$PACKAGE_NAME" "$BUILT_SHA" "$PACKAGE_SHA256"
+            printf '\nThe publishing job downloads this same asset and checks this digest.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+          PACKAGE_NAME: ${{ steps.candidate.outputs.package_name }}
+          PACKAGE_SHA256: ${{ steps.candidate.outputs.package_sha256 }}
+
+  publish_nuget:
+    name: Approve and publish NuGet package
+    if: ${{ inputs.publish }}
+    needs: [pack, prepare_candidate]
+    runs-on: ubuntu-latest
+    environment: nuget-release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      # Draft releases require push access to see; keep this in the write-enabled job.
+      - name: Verify draft release and source commit
+        run: |
+          release_info=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')
+          IFS=$'\t' read -r is_draft target_commit <<< "$release_info"
+          if [[ "$is_draft" != true ]]; then
+            echo "::error::The GitHub release must still be a draft."
+            exit 1
+          fi
+          if [[ "$target_commit" != "$RELEASE_SHA" ]]; then
+            echo "::error::The draft release targetCommitish does not match release_sha."
+            exit 1
+          fi
+          if [[ "$BUILT_SHA" != "$RELEASE_SHA" ]]; then
+            echo "::error::The package build commit does not match release_sha."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+
+      - name: Verify existing release tag
+        run: |
+          tag_ref="refs/tags/$RELEASE_TAG"
+          if tag_refs=$(git ls-remote --exit-code --tags \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$tag_ref" "$tag_ref^{}"); then
+            # Prefer the peeled commit for annotated tags; lightweight tags point directly at it.
+            tag_sha=$(awk -v ref="$tag_ref" '
+              $2 == ref { direct = $1 }
+              $2 == ref "^{}" { peeled = $1 }
+              END { print peeled ? peeled : direct }
+            ' <<< "$tag_refs")
+            if [[ "$tag_sha" != "$BUILT_SHA" ]]; then
+              echo "::error::The existing release tag does not point to the package build commit."
+              exit 1
+            fi
+          else
+            status=$?
+            # Exit 2 means no matching ref. Authentication/network errors must fail closed.
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Could not verify the release tag."
+              exit "$status"
+            fi
+          fi
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+
+      - name: Download and verify the reviewed candidate
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$PACKAGE_NAME" --pattern release-attestation.sigstore.json --dir artifacts
+          printf '%s  %s\n' "$PACKAGE_SHA256" "artifacts/$PACKAGE_NAME" | sha256sum --check
+          gh attestation verify "artifacts/$PACKAGE_NAME" --repo "$GITHUB_REPOSITORY" \
+            --bundle artifacts/release-attestation.sigstore.json \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          jq -r '.dsseEnvelope.payload' artifacts/release-attestation.sigstore.json | base64 --decode \
+            | jq -e --arg sha "$BUILT_SHA" \
+                --arg uri "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$BUILT_SHA" '
+                .predicateType == "https://slsa.dev/provenance/v1"
+                and any(.predicate.buildDefinition.resolvedDependencies[];
+                  .name == "release-source" and .uri == $uri and .digest.gitCommit == $sha)
+              ' > /dev/null
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
+          PACKAGE_NAME: ${{ needs.prepare_candidate.outputs.package_name }}
+          PACKAGE_SHA256: ${{ needs.prepare_candidate.outputs.package_sha256 }}
+
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
         id: nuget-login
         with:
@@ -205,27 +336,9 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
 
-  # Separate jobs let "Re-run failed jobs" resume without repeating successful uploads.
-  attach_package:
-    name: Attach package to GitHub release
-    needs: publish_nuget
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: nuget-package
-          path: artifacts
-      - name: Attach package to draft release
-        run: gh release upload "$RELEASE_TAG" artifacts/*.nupkg --repo "$GITHUB_REPOSITORY"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-
   publish_release:
     name: Publish GitHub release
-    needs: [attach_package, pack]
+    needs: [publish_nuget, pack]
     runs-on: ubuntu-latest
     permissions:
       contents: write
