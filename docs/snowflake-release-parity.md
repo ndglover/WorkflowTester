@@ -37,4 +37,9 @@ Merge the generated release PR, approve the dispatched publishing run, then veri
 
 For a draft left behind after dispatch failure, run `release.yml` manually with its intended tag name and full release commit SHA. Do not publish the draft manually before the package is attached.
 
-If publishing fails after NuGet upload, the package may already exist on NuGet.org. Do not blindly rerun the complete publishing job: complete the remaining draft upload/publication steps using the original build artifact.
+The release workflow uses separate build, NuGet publish, asset attachment, and GitHub publication jobs. Use **Re-run failed jobs** after a partial failure: successful jobs are not repeated, and later jobs download the original saved package. A full rerun builds another package; after NuGet publication, prefer resuming the original run. NuGet versions cannot be replaced. If an upload was accepted but its job failed, inspect the existing package or draft asset before recovering manually.
+
+
+## Normal pipeline trial
+
+The release workflow mirrors the current Snowflake workflow, adapted only for this repository's project path, workflow name, and dotnet tag prefix. Temporary failure injection and the one-off retry/source verification workflows have been removed. Published test releases retain the earlier verification history.
