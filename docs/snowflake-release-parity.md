@@ -1,13 +1,13 @@
 # Immutable release test
 
-WorkflowTester now tests the proposed fix for Snowflake's release workflow.
+WorkflowTester trials a single release workflow that stages a downloadable candidate before publishing approval.
 
 1. Release Please maintains a version/changelog PR.
 2. After the PR is merged, it creates a **draft** GitHub release (`draft: true`).
 3. The action explicitly dispatches `release.yml` with the release tag name and full commit SHA. Draft creation does not create a Git tag, so a tag-push trigger would not work.
 4. The build job validates the inputs, checks out that SHA, checks its package version matches the intended tag, and packs the library with read-only permissions.
-5. After `nuget-release` environment approval, the write-enabled publishing job verifies the release is still a draft, then attests and pushes the package to NuGet.org. Draft visibility requires push access, so draft lookup must not run in the read-only build job.
-6. It uploads the `.nupkg` to the draft, then publishes the GitHub release. Publication creates the tag and freezes the attached asset under release immutability.
+5. The separate write-enabled candidate job verifies the draft and source commit, generates provenance, and attaches the package and attestation bundle to the draft. It downloads and verifies the assets and writes the draft link and package digest to the run summary. Maintainers can now download and test the candidate.
+6. After `nuget-release` environment approval, the publishing job downloads that same attached candidate, checks its recorded SHA-256 and attestation/source, and pushes to NuGet.org. A final job publishes the draft and freezes the assets under release immutability.
 
 ## Required setup
 
@@ -37,9 +37,14 @@ Merge the generated release PR, approve the dispatched publishing run, then veri
 
 For a draft left behind after dispatch failure, run `release.yml` manually with its intended tag name and full release commit SHA. Do not publish the draft manually before the package is attached.
 
-The release workflow uses separate build, NuGet publish, asset attachment, and GitHub publication jobs. Use **Re-run failed jobs** after a partial failure: successful jobs are not repeated, and later jobs download the original saved package. A full rerun builds another package; after NuGet publication, prefer resuming the original run. NuGet versions cannot be replaced. If an upload was accepted but its job failed, inspect the existing package or draft asset before recovering manually.
+The release workflow uses separate build, candidate preparation, NuGet publication, and GitHub publication jobs. Use **Re-run failed jobs** after a partial failure: successful jobs are not repeated, and later jobs download the original saved package. A full rerun builds another package; after NuGet publication, prefer resuming the original run. NuGet versions cannot be replaced. If an upload was accepted but its job failed, inspect the existing package or draft asset before recovering manually.
 
 
 ## Normal pipeline trial
 
-The release workflow mirrors the current Snowflake workflow, adapted only for this repository's project path, workflow name, and dotnet tag prefix. Temporary failure injection and the one-off retry/source verification workflows have been removed. Published test releases retain the earlier verification history.
+The test branch moves attestation and draft attachment before the publishing approval gate. The Snowflake workflow is unchanged until this trial is reviewed. Temporary failure injection and the one-off retry/source verification workflows have been removed. Published test releases retain the earlier verification history.
+
+
+## Candidate preparation without publication
+
+Dispatch release.yml with publish=false to build, attest, and attach a candidate without starting either publication job. The source SHA must match the draft target and package version. A candidate may be deliberately replaced while the release is a draft and the NuGet version has not been published; test and approve the replacement again. Each run records its own digest, so changing an attached asset after staging causes that run's publication check to fail.

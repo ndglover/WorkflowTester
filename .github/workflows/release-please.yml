@@ -15,7 +15,7 @@
 # Watches conventional-commit pushes to main and maintains a release PR for
 # WorkflowTester.Lib. Merging it creates a draft GitHub release.
 # Dispatch the package workflow explicitly: a draft has no Git tag yet.
-name: Release Please
+name: Prepare Release
 
 on:
   push:
@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 jobs:
-  tag:
+  prepare_release:
     runs-on: ubuntu-latest
     permissions:
       contents: read
