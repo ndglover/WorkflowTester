@@ -45,7 +45,7 @@ jobs:
       contents: write
       actions: write
     outputs:
-      candidate: ${{ steps.plan.outputs.candidate == 'true' && steps.version.outputs.needs_pr != 'true' }}
+      candidate: ${{ steps.plan.outputs.candidate == 'true' && steps.version.outputs.needs_pr != 'true' && (github.ref_name == 'main' || inputs.release_tag != '') }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       release_sha: ${{ steps.plan.outputs.release_sha }}
     steps:
@@ -148,7 +148,7 @@ jobs:
           skip-github-release: true
 
       - name: Supersede older approvals for this workflow branch
-        if: ${{ steps.plan.outputs.candidate == 'true' }}
+        if: ${{ steps.plan.outputs.candidate == 'true' && (github.ref_name == 'main' || inputs.release_tag != '') }}
         run: |
           branch=${GITHUB_REF_NAME//\//%2F}
           waiting=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?status=waiting&branch=$branch&per_page=100" \
