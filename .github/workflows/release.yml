@@ -124,7 +124,9 @@ jobs:
 
       - name: Install pinned version planner
         if: ${{ steps.plan.outputs.candidate == 'true' && inputs.release_tag == '' }}
-        run: npm ci --prefix .github/release-tools --ignore-scripts
+        run: |
+          npm ci --prefix .github/release-tools --ignore-scripts
+          node --test .github/release-tools/check-candidate-version.test.cjs
 
       - name: Recalculate candidate version from published baseline
         id: version
