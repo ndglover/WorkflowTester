@@ -1,57 +1,31 @@
-# Immutable release test
+# Single release pipeline trial
 
-WorkflowTester trials a single release workflow that stages a downloadable candidate before publishing approval.
+WorkflowTester uses one release workflow, release.yml. It runs on relevant pushes to main or manual dispatch. The separate Release Please workflow has been removed.
 
-1. Release Please maintains a version/changelog PR.
-2. After the PR is merged, it creates a **draft** GitHub release (`draft: true`).
-3. The action explicitly dispatches `release.yml` with the release tag name and full commit SHA. Draft creation does not create a Git tag, so a tag-push trigger would not work.
-4. The build job validates the inputs, checks out that SHA, checks its package version matches the intended tag, and packs the library with read-only permissions.
-5. The separate write-enabled candidate job verifies the draft and source commit, generates provenance, and attaches the package and attestation bundle to the draft. It downloads and verifies the assets and writes the draft link and package digest to the run summary. Maintainers can now download and test the candidate.
-6. After `nuget-release` environment approval, the publishing job downloads that same attached candidate, checks its recorded SHA-256 and attestation/source, and pushes to NuGet.org. A final job publishes the draft and freezes the assets under release immutability.
+## Visible stages
 
-## Required setup
+1. Prepare release or refresh candidate: process a merged release PR, or maintain the next version/changelog PR if no current draft exists. When the current version is still a draft, select the newest source and refresh that candidate instead of proposing another version.
+2. Build candidate: check out the exact planned SHA, check the version, build the package once, and save it as a workflow artifact. Build permissions remain read-only.
+3. Stage candidate for testing: update the draft target and generated release notes; attest the actual package source; attach the package and provenance; download and verify them. The summary links to the draft and shows source SHA and digest.
+4. Approve and publish to NuGet: wait for the existing nuget-release approval; verify the source, digest, and signed provenance; freeze the candidate; authenticate with OIDC and push that same package.
+5. Publish GitHub release: publish the draft, locking its assets and tag when repository immutability is enabled.
 
-- Keep release immutability enabled.
-- Configure the repository Actions secret `RELEASE_PLEASE_TOKEN` for Release Please. Scope it to this repository with Contents and Pull requests write access. The repository setting allowing the built-in Actions token to create/approve PRs can remain disabled.
-- Release Please uses the separate token to manage release PRs and draft releases, matching Snowflake. The built-in GitHub token only has Contents read and Actions write for explicitly dispatching `release.yml`; it is not granted Pull requests write.
-- Keep `NUGET_USER`, the `nuget-release` environment approval gate, and the NuGet Trusted Publishing policy for `release.yml`. The publishing workflow runs on `main` via dispatch, so any environment branch restrictions must allow `main`.
-- The policy must allow the existing workflow/environment combination to authenticate when dispatched from `main`.
+## Refresh and approval
 
-## Adaptations for the test repository
+A new relevant push while the candidate remains unpublished replaces the draft candidate with a new package, source SHA, release notes, and provenance. The previous waiting approval is superseded. Plan jobs are serialised; draft mutation and NuGet publication share a candidate lock. Superseded source checks prevent old runs from publishing stale candidates.
 
-- Package: `WorkflowTester.Lib`; project: `src/WorkflowTester.Lib`.
-- Tags use `dotnet/v*` instead of `csharp/v*`.
-- `release.yml` retains its filename to match the existing NuGet policy.
-- Stable versions come from the project file and Release Please manifest.
-- MinVer remains enabled only for the separate manual preview workflow.
+The publishing job marks publication started before contacting NuGet. Once that marker is set, or the version is found on NuGet, preparation stops rebuilding that version. Resume the original run after a partial publication failure. Subsequent code changes need the next version after this release is finished.
 
-## Baselines
+Do not use cancel-in-progress on the whole workflow: that could interrupt a package upload. Automatic supersession targets runs waiting for approval. If approval and supersession cross, the publication marker retains the frozen candidate for recovery.
 
-- `dotnet/v0.0.3`: original workflow succeeded with a mutable release.
-- `dotnet/v0.0.4`: original workflow succeeded with an immutable release and attached package using `softprops/action-gh-release`.
-- Commit `5dd9787`: mirrored Snowflake's publish-before-upload sequence. Its Release Please run failed because `RELEASE_PLEASE_TOKEN` was absent, so that sequence was not exercised end to end.
+## Manual branch tests
 
-## Verification and recovery
+Supply an existing draft release_tag and matching project-version release_sha, and set publish=false. This runs planning, build and staging without either publication job. Supply both fields together. With no explicit tag, the workflow operates on the current main release state.
 
-Merge the generated release PR, approve the dispatched publishing run, then verify that the public release is immutable and contains the correctly versioned `.nupkg`.
+The 0.0.900 draft and fixture branch are dedicated test data. They are not NuGet releases. Normal selection follows the manifest version rather than these test fixtures.
 
-For a draft left behind after dispatch failure, run `release.yml` manually with its intended tag name and full release commit SHA. Do not publish the draft manually before the package is attached.
+## Setup retained
 
-The release workflow uses separate build, candidate preparation, NuGet publication, and GitHub publication jobs. Use **Re-run failed jobs** after a partial failure: successful jobs are not repeated, and later jobs download the original saved package. A full rerun builds another package; after NuGet publication, prefer resuming the original run. NuGet versions cannot be replaced. If an upload was accepted but its job failed, inspect the existing package or draft asset before recovering manually.
+Keep release immutability, the nuget-release environment and main deployment rule, NUGET_USER, and the NuGet trusted-publishing policy for release.yml. RELEASE_PLEASE_TOKEN manages release PRs and exposes drafts to the planning job. The built-in token is used for candidate attachment, attestations, publication, and superseding old waiting runs.
 
-
-## Normal pipeline trial
-
-The test branch moves attestation and draft attachment before the publishing approval gate. The Snowflake workflow is unchanged until this trial is reviewed. Temporary failure injection and the one-off retry/source verification workflows have been removed. Published test releases retain the earlier verification history.
-
-
-## Candidate preparation without publication
-
-Dispatch release.yml with publish=false to build, attest, and attach a candidate without starting either publication job. The source SHA must match the draft target and package version. A candidate may be deliberately replaced while the release is a draft and the NuGet version has not been published; test and approve the replacement again. Each run records its own digest, so changing an attached asset after staging causes that run's publication check to fail.
-
-
-## Avoiding repeated release PRs while approval is pending
-
-Prepare Release first processes merged release PRs without opening another PR. It then checks whether the current manifest version has a draft release. If so, it waits for that release to be published rather than asking Release Please to calculate another version against the old published baseline. A newly created draft is still dispatched to the Release workflow.
-
-The current-version check deliberately ignores the separate 0.0.900 branch-test fixture. Once the current release is published, the next relevant push can maintain a new release PR normally. Merging a release PR prepares its candidate; publishing approval is the next action, rather than merging another version PR.
+The separate Publish Preview workflow is retained as an unrelated manual preview tool. Snowflake's workflows are unchanged pending review of this trial.
