@@ -1,6 +1,6 @@
 # Publishing NuGet packages from a Go + C# GitHub repo
 
-Research notes and recommendation. Context for implementation.
+Historical research notes. The current trial uses the single release pipeline described in [snowflake-release-parity.md](snowflake-release-parity.md); the separate PR preview publishing workflow has been removed.
 
 ---
 
