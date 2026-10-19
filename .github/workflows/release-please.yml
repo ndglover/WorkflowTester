@@ -39,12 +39,42 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+      - name: Create draft from merged release PR
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
+
+      - name: Check whether the current release awaits publication
+        id: publication
+        run: |
+          version=$(gh api "repos/$GITHUB_REPOSITORY/contents/.release-please-manifest.json?ref=main" \
+            --jq .content | base64 --decode | jq -er '."src/WorkflowTester.Lib"')
+          release_tag="dotnet/v$version"
+          draft_tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft) | .tag_name')
+          if grep -Fxq -- "$release_tag" <<< "$draft_tags"; then
+            echo 'pending=true' >> "$GITHUB_OUTPUT"
+            printf 'Release `%s` is awaiting publication. No new release PR will be opened.\n' \
+              "$release_tag" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'pending=false' >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          # Draft visibility needs the same write-capable token used by Release Please.
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Maintain release PR when no release is pending
+        if: ${{ steps.publication.outputs.pending == 'false' }}
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
 
       - name: Start draft release publishing
         if: ${{ steps.release.outputs['src/WorkflowTester.Lib--release_created'] == 'true' }}
