@@ -48,3 +48,10 @@ The test branch moves attestation and draft attachment before the publishing app
 ## Candidate preparation without publication
 
 Dispatch release.yml with publish=false to build, attest, and attach a candidate without starting either publication job. The source SHA must match the draft target and package version. A candidate may be deliberately replaced while the release is a draft and the NuGet version has not been published; test and approve the replacement again. Each run records its own digest, so changing an attached asset after staging causes that run's publication check to fail.
+
+
+## Avoiding repeated release PRs while approval is pending
+
+Prepare Release first processes merged release PRs without opening another PR. It then checks whether the current manifest version has a draft release. If so, it waits for that release to be published rather than asking Release Please to calculate another version against the old published baseline. A newly created draft is still dispatched to the Release workflow.
+
+The current-version check deliberately ignores the separate 0.0.900 branch-test fixture. Once the current release is published, the next relevant push can maintain a new release PR normally. Merging a release PR prepares its candidate; publishing approval is the next action, rather than merging another version PR.
