@@ -28,4 +28,4 @@ The 0.0.900 draft and fixture branch are dedicated test data. They are not NuGet
 
 Keep release immutability, the nuget-release environment and main deployment rule, NUGET_USER, and the NuGet trusted-publishing policy for release.yml. RELEASE_PLEASE_TOKEN manages release PRs and exposes drafts to the planning job. The built-in token is used for candidate attachment, attestations, publication, and superseding old waiting runs.
 
-The separate Publish Preview workflow is retained as an unrelated manual preview tool. Snowflake's workflows are unchanged pending review of this trial.
+The separate Publish Preview workflow and its preview-only MinVer settings have been removed. Download candidate packages from the draft GitHub release for testing. Snowflake's workflows are unchanged pending review of this trial.

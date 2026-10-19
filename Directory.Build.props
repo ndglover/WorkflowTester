@@ -13,12 +13,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
-    <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" Condition="'$(MinVerVersionOverride)' != ''" />
   </ItemGroup>
-
-  <PropertyGroup>
-    <MinVerTagPrefix>dotnet/v</MinVerTagPrefix>
-    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
-  </PropertyGroup>
 
 </Project>
