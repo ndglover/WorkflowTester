@@ -17,6 +17,7 @@ on:
       - 'Directory.Build.props'
       - 'release-please-config.json'
       - '.github/workflows/release.yml'
+      - '.github/release-tools/**'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -44,7 +45,7 @@ jobs:
       contents: write
       actions: write
     outputs:
-      candidate: ${{ steps.plan.outputs.candidate }}
+      candidate: ${{ steps.plan.outputs.candidate == 'true' && steps.version.outputs.needs_pr != 'true' }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       release_sha: ${{ steps.plan.outputs.release_sha }}
     steps:
@@ -59,7 +60,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
 
       - name: Create draft from a merged release PR
-        if: ${{ inputs.release_tag == '' }}
+        if: ${{ inputs.release_tag == '' && github.ref_name == 'main' }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -116,8 +117,27 @@ jobs:
           SELECTED_TAG: ${{ inputs.release_tag }}
           RELEASE_SHA: ${{ inputs.release_sha }}
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ steps.plan.outputs.candidate == 'true' && inputs.release_tag == '' }}
+        with:
+          persist-credentials: false
+
+      - name: Install pinned version planner
+        if: ${{ steps.plan.outputs.candidate == 'true' && inputs.release_tag == '' }}
+        run: npm ci --prefix .github/release-tools --ignore-scripts
+
+      - name: Recalculate candidate version from published baseline
+        id: version
+        if: ${{ steps.plan.outputs.candidate == 'true' && inputs.release_tag == '' }}
+        run: |
+          args=()
+          if [[ "$GITHUB_REF_NAME" == main ]]; then args+=(--apply); fi
+          node .github/release-tools/check-candidate-version.cjs "${args[@]}"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
       - name: Maintain the next release PR
-        if: ${{ steps.plan.outputs.needs_pr == 'true' }}
+        if: ${{ steps.plan.outputs.needs_pr == 'true' && github.ref_name == 'main' }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}

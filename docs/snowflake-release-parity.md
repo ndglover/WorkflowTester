@@ -4,7 +4,7 @@ WorkflowTester uses one release workflow, release.yml. It runs on relevant pushe
 
 ## Visible stages
 
-1. Prepare release or refresh candidate: process a merged release PR, or maintain the next version/changelog PR if no current draft exists. When the current version is still a draft, select the newest source and refresh that candidate instead of proposing another version.
+1. Prepare release or refresh candidate: process a merged release PR, or maintain the next version/changelog PR if no current draft exists. When the current version is still a draft, recalculate the required version against the last published release. Refresh the candidate only when its committed version still covers the accumulated changes. If a higher version is required, update the release PR and pause candidate builds until its version/changelog changes are merged.
 2. Build candidate: check out the exact planned SHA, check the version, build the package once, and save it as a workflow artifact. Build permissions remain read-only.
 3. Stage candidate for testing: update the draft target and generated release notes; attest the actual package source; attach the package and provenance; download and verify them. The summary links to the draft and shows source SHA and digest.
 4. Approve and publish to NuGet: wait for the existing nuget-release approval; verify the source, digest, and signed provenance; freeze the candidate; authenticate with OIDC and push that same package.
@@ -12,7 +12,7 @@ WorkflowTester uses one release workflow, release.yml. It runs on relevant pushe
 
 ## Refresh and approval
 
-A new relevant push while the candidate remains unpublished replaces the draft candidate with a new package, source SHA, release notes, and provenance. The previous waiting approval is superseded. Plan jobs are serialised; draft mutation and NuGet publication share a candidate lock. Superseded source checks prevent old runs from publishing stale candidates.
+A new relevant push while the candidate remains unpublished first checks its semantic version. If that version is still appropriate, it replaces the draft candidate with a new package, source SHA, release notes, and provenance. A breaking change that requires a higher version supersedes the old approval and updates the release PR instead. After that PR is merged, its committed version is built and staged as the new draft. Older drafts remain unpublished; use the newest candidate and its approval run. The previous waiting approval is superseded. Plan jobs are serialised; draft mutation and NuGet publication share a candidate lock. Superseded source checks prevent old runs from publishing stale candidates.
 
 The publishing job marks publication started before contacting NuGet. Once that marker is set, or the version is found on NuGet, preparation stops rebuilding that version. Resume the original run after a partial publication failure. Subsequent code changes need the next version after this release is finished.
 
@@ -20,7 +20,7 @@ Do not use cancel-in-progress on the whole workflow: that could interrupt a pack
 
 ## Manual branch tests
 
-Supply an existing draft release_tag and matching project-version release_sha, and set publish=false. This runs planning, build and staging without either publication job. Supply both fields together. With no explicit tag, the workflow operates on the current main release state.
+Supply an existing draft release_tag and matching project-version release_sha, and set publish=false. This runs planning, build and staging without either publication job. Supply both fields together. With no explicit tag, the workflow operates on the current main release state. A branch dispatch without an explicit tag performs a read-only version calculation: it does not create drafts or update release PRs. Explicit fixture selections bypass automatic version recalculation.
 
 The 0.0.900 draft and fixture branch are dedicated test data. They are not NuGet releases. Normal selection follows the manifest version rather than these test fixtures.
 
@@ -29,3 +29,6 @@ The 0.0.900 draft and fixture branch are dedicated test data. They are not NuGet
 Keep release immutability, the nuget-release environment and main deployment rule, NUGET_USER, and the NuGet trusted-publishing policy for release.yml. RELEASE_PLEASE_TOKEN manages release PRs and exposes drafts to the planning job. The built-in token is used for candidate attachment, attestations, publication, and superseding old waiting runs.
 
 The separate Publish Preview workflow and its preview-only MinVer settings have been removed. Download candidate packages from the draft GitHub release for testing. Snowflake's workflows are unchanged pending review of this trial.
+## Version regression checks
+
+Run `node --test .github/release-tools/check-candidate-version.test.cjs`. The planner uses pinned Release Please 17.3.0 and its existing repository configuration. Its baseline is the highest published stable dotnet version; the committed draft version is a floor, so reruns cannot downgrade it or keep incrementing it. No custom conventional-commit parser is used.
