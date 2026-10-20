@@ -17,6 +17,7 @@ on:
       - 'Directory.Build.props'
       - 'release-please-config.json'
       - '.github/workflows/release.yml'
+      - '.github/actions/release-pr-progress/**'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -53,6 +54,8 @@ jobs:
       candidate: ${{ steps.final.outputs.candidate }}
       release_tag: ${{ steps.final.outputs.release_tag }}
       release_sha: ${{ steps.final.outputs.release_sha }}
+      release_pr: ${{ steps.final.outputs.release_pr }}
+      version: ${{ steps.final.outputs.version }}
       preview_sha: ${{ steps.preview.outputs.source_sha }}
       preview_version: ${{ steps.preview.outputs.version }}
       preview_pr: ${{ steps.preview.outputs.release_pr }}
@@ -99,7 +102,11 @@ jobs:
             fi
             echo 'candidate=true' >> "$GITHUB_OUTPUT"
             echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#dotnet/v}" >> "$GITHUB_OUTPUT"
             echo "release_sha=$source_sha" >> "$GITHUB_OUTPUT"
+            release_pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$source_sha/pulls" \
+              --jq '[.[] | select(.merged_at != null and (.head.ref | startswith("release-please--")))][0].number // empty')
+            echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
             echo 'maintain_pr=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -126,6 +133,22 @@ jobs:
           PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
           NEW_TAG: ${{ steps.release.outputs['src/WorkflowTester.Lib--tag_name'] }}
           NEW_SHA: ${{ steps.release.outputs['src/WorkflowTester.Lib--sha'] }}
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ steps.final.outputs.release_pr != '' }}
+        with:
+          persist-credentials: false
+
+      - name: Show final package build on release PR
+        if: ${{ steps.final.outputs.release_pr != '' }}
+        uses: ./.github/actions/release-pr-progress
+        with:
+          token: ${{ github.token }}
+          pr: ${{ steps.final.outputs.release_pr }}
+          stage: building
+          version: ${{ steps.final.outputs.version }}
+          source-sha: ${{ steps.final.outputs.release_sha }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Maintain one release PR
         id: release_pr
@@ -254,35 +277,23 @@ jobs:
     permissions:
       statuses: write
       pull-requests: write
+      contents: read
     steps:
-      - name: Add prominent preview download to release PR description
-        run: |
-          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR")
-          if [[ "$(jq -r .state <<< "$pr")" != open ]] || \
-             [[ "$(jq -r .head.sha <<< "$pr")" != "$SOURCE_SHA" ]]; then
-            echo 'Release PR changed or closed; leave its current description unchanged.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          jq --arg version "$PREVIEW_VERSION" --arg url "$ARTIFACT_URL" \
-            --arg days "$RETENTION_DAYS" --arg sha "$SOURCE_SHA" --arg trigger "$TRIGGER_PR" '
-            {body: (
-              "<!-- release-preview:start -->\n### Preview package\n\n" +
-              "**[Download preview package](" + $url + ")** - `" + $version + "`\n\n" +
-              "Download the ZIP and extract the `.nupkg` to test locally. " +
-              "Available for " + $days + " days from upload.\n\n" +
-              "Triggered by #" + $trigger + "; source commit: `" + $sha + "`.\n" +
-              "<!-- release-preview:end -->\n\n" +
-              ((.body // "") | sub("(?s)<!-- release-preview:start -->.*?<!-- release-preview:end -->\\n*"; ""))
-            )}' <<< "$pr" > preview-pr.json
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR" --input preview-pr.json > /dev/null
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
-          SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
-          PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
-          ARTIFACT_URL: ${{ needs.preview.outputs.artifact_url }}
-          RETENTION_DAYS: ${{ needs.preview.outputs.retention_days }}
-          TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Show preview and next action on release PR
+        uses: ./.github/actions/release-pr-progress
+        with:
+          token: ${{ github.token }}
+          pr: ${{ needs.plan.outputs.preview_pr }}
+          stage: preview
+          version: ${{ needs.plan.outputs.preview_version }}
+          source-sha: ${{ needs.plan.outputs.preview_sha }}
+          artifact-url: ${{ needs.preview.outputs.artifact_url }}
+          retention-days: ${{ needs.preview.outputs.retention_days }}
+          trigger-pr: ${{ needs.plan.outputs.trigger_pr }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Add preview download status to release PR commit
         run: |
@@ -302,6 +313,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.package.outputs.source_sha }}
+      artifact_url: ${{ steps.final_artifact.outputs.artifact-url }}
     permissions:
       contents: read
     steps:
@@ -337,6 +349,7 @@ jobs:
           RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: final_artifact
         with:
           name: nuget-package
           path: artifacts/*.nupkg
@@ -357,6 +370,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      pull-requests: write
     steps:
       - name: Refresh draft source and release notes
         run: |
@@ -409,6 +423,7 @@ jobs:
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        id: final_artifact
         with:
           name: nuget-package
           path: artifacts
@@ -509,6 +524,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ needs.plan.outputs.release_pr != '' }}
+        with:
+          persist-credentials: false
+      - name: Show final package and publication approval on release PR
+        if: ${{ needs.plan.outputs.release_pr != '' }}
+        uses: ./.github/actions/release-pr-progress
+        with:
+          token: ${{ github.token }}
+          pr: ${{ needs.plan.outputs.release_pr }}
+          stage: ${{ (github.event_name != 'workflow_dispatch' || inputs.publish) && 'ready' || 'staged' }}
+          version: ${{ needs.plan.outputs.version }}
+          source-sha: ${{ needs.plan.outputs.release_sha }}
+          artifact-url: ${{ needs.pack.outputs.artifact_url }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   publish_nuget:
     name: 5 - Approve and publish to NuGet
@@ -666,3 +697,48 @@ jobs:
         run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish=false
         env:
           GH_TOKEN: ${{ github.token }}
+
+  release_progress:
+    name: Update release PR outcome
+    if: ${{ always() && needs.plan.outputs.candidate == 'true' && needs.plan.outputs.release_pr != '' }}
+    needs: [plan, pack, prepare_candidate, publish_nuget, publish_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Determine actual release outcome
+        id: outcome
+        run: |
+          is_draft=true
+          if [[ "$NUGET_RESULT" == success ]]; then
+            # Published releases are readable here. A still-private draft (or
+            # an API failure) must never be reported as a completed release.
+            is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo true)
+          fi
+          if [[ "$is_draft" == false ]]; then
+            echo 'stage=published' >> "$GITHUB_OUTPUT"
+          elif [[ "$STAGING_RESULT" == success && "$PUBLISH_ENABLED" == false ]]; then
+            echo 'stage=staged' >> "$GITHUB_OUTPUT"
+          else
+            echo 'stage=attention' >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          STAGING_RESULT: ${{ needs.prepare_candidate.result }}
+          NUGET_RESULT: ${{ needs.publish_nuget.result }}
+          PUBLISH_ENABLED: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+      - name: Show published release or recovery action on release PR
+        uses: ./.github/actions/release-pr-progress
+        with:
+          token: ${{ github.token }}
+          pr: ${{ needs.plan.outputs.release_pr }}
+          stage: ${{ steps.outcome.outputs.stage }}
+          version: ${{ needs.plan.outputs.version }}
+          source-sha: ${{ needs.plan.outputs.release_sha }}
+          artifact-url: ${{ needs.pack.outputs.artifact_url }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
