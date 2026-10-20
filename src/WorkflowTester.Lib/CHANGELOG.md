@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/ndglover/WorkflowTester/compare/dotnet/v0.1.2...dotnet/v1.0.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** hello again
+
+### Features
+
+* **api:** hello again ([f3566b3](https://github.com/ndglover/WorkflowTester/commit/f3566b37a1698968b1131b59a2c142a3f2a7b872))
+
 ## [0.3.0](https://github.com/ndglover/WorkflowTester/compare/dotnet/v0.2.0...dotnet/v0.3.0) (2026-10-19)
 
 
