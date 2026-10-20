@@ -60,6 +60,7 @@ jobs:
       preview_version: ${{ steps.preview.outputs.version }}
       preview_pr: ${{ steps.preview.outputs.release_pr }}
       trigger_pr: ${{ steps.preview.outputs.trigger_pr }}
+      trigger_sha: ${{ steps.preview.outputs.trigger_sha }}
     steps:
       - name: Validate manual source selection
         run: |
@@ -192,16 +193,28 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           trigger_pr=$TRIGGER_PR
           if [[ "$trigger_pr" == 0 ]]; then
-            trigger_pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
-              --jq '[.[] | select(.merged_at != null)][0].number // 0')
+            associated_prs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")
+            trigger_pr=$(jq -r --arg sha "$GITHUB_SHA" \
+              '[.[] | select(.merged_at != null and .merge_commit_sha == $sha)][0].number // 0' <<< "$associated_prs")
           fi
-          [[ "$trigger_pr" =~ ^[1-9][0-9]*$ ]]
-          # Explicit manual tests must also identify a real merged code PR.
-          gh pr view "$trigger_pr" --repo "$GITHUB_REPOSITORY" --json state --jq .state | grep -qx MERGED
-          echo "version=$version-preview.$trigger_pr" >> "$GITHUB_OUTPUT"
+          trigger_sha=$GITHUB_SHA
+          if [[ "$trigger_pr" == 0 ]]; then
+            [[ "$trigger_sha" =~ ^[0-9a-f]{40}$ ]]
+            suffix=${trigger_sha:0:7}
+            # A numeric prerelease identifier cannot have leading zeroes.
+            if [[ "$suffix" =~ ^0[0-9]+$ ]]; then suffix=$trigger_sha; fi
+          else
+            [[ "$trigger_pr" =~ ^[1-9][0-9]*$ ]]
+            trigger=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$trigger_pr")
+            test "$(jq -r .merged <<< "$trigger")" = true
+            trigger_sha=$(jq -er .merge_commit_sha <<< "$trigger")
+            suffix=$trigger_pr
+          fi
+          echo "version=$version-preview.$suffix" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
           echo "trigger_pr=$trigger_pr" >> "$GITHUB_OUTPUT"
+          echo "trigger_sha=$trigger_sha" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
@@ -241,13 +254,14 @@ jobs:
           dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o artifacts \
             -p:Version="$PREVIEW_VERSION" -p:PackageVersion="$PREVIEW_VERSION"
           jq -n --arg version "$PREVIEW_VERSION" --arg sha "$SOURCE_SHA" \
-            --argjson release_pr "$RELEASE_PR" --argjson trigger_pr "$TRIGGER_PR" \
-            '{version:$version,source_sha:$sha,release_pr:$release_pr,trigger_pr:$trigger_pr}' > artifacts/preview-source.json
+            --argjson release_pr "$RELEASE_PR" --argjson trigger_pr "$TRIGGER_PR" --arg trigger_sha "$TRIGGER_SHA" \
+            '{version:$version,source_sha:$sha,release_pr:$release_pr,trigger_pr:(if $trigger_pr == 0 then null else $trigger_pr end),trigger_sha:$trigger_sha}' > artifacts/preview-source.json
         env:
           PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
           SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
           RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
           TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+          TRIGGER_SHA: ${{ needs.plan.outputs.trigger_sha }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         id: upload
         with:
@@ -257,14 +271,22 @@ jobs:
           retention-days: ${{ steps.settings.outputs.retention_days }}
       - name: Show preview download
         run: |
-          printf '[Download %s](%s) — retained for %s days.\n\nSource: `%s`; triggering PR: #%s; release PR: #%s.\n' \
-            "$PREVIEW_VERSION" "$ARTIFACT_URL" "$RETENTION_DAYS" "$SOURCE_SHA" "$TRIGGER_PR" "$RELEASE_PR" >> "$GITHUB_STEP_SUMMARY"
+          {
+            printf '[Download %s](%s) — retained for %s days.\n\nSource: `%s`; release PR: #%s.\n' \
+              "$PREVIEW_VERSION" "$ARTIFACT_URL" "$RETENTION_DAYS" "$SOURCE_SHA" "$RELEASE_PR"
+            if [[ "$TRIGGER_PR" == 0 ]]; then
+              printf 'Triggered by commit: `%s`.\n' "$TRIGGER_SHA"
+            else
+              printf 'Triggered by PR #%s (merge commit `%s`).\n' "$TRIGGER_PR" "$TRIGGER_SHA"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           RETENTION_DAYS: ${{ steps.settings.outputs.retention_days }}
           SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
           TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+          TRIGGER_SHA: ${{ needs.plan.outputs.trigger_sha }}
           RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
 
   preview_link:
@@ -293,6 +315,7 @@ jobs:
           artifact-url: ${{ needs.preview.outputs.artifact_url }}
           retention-days: ${{ needs.preview.outputs.retention_days }}
           trigger-pr: ${{ needs.plan.outputs.trigger_pr }}
+          trigger-sha: ${{ needs.plan.outputs.trigger_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Add preview download status to release PR commit
