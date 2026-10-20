@@ -194,6 +194,7 @@ jobs:
       contents: read
     outputs:
       artifact_url: ${{ steps.upload.outputs.artifact-url }}
+      retention_days: ${{ steps.settings.outputs.retention_days }}
     steps:
       - name: Validate preview retention
         id: settings
@@ -247,9 +248,42 @@ jobs:
     name: Link preview from release PR
     needs: [plan, preview]
     runs-on: ubuntu-latest
+    concurrency:
+      group: preview-link-${{ github.repository }}-${{ needs.plan.outputs.preview_pr }}
+      cancel-in-progress: false
     permissions:
       statuses: write
+      pull-requests: write
     steps:
+      - name: Add prominent preview download to release PR description
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR")
+          if [[ "$(jq -r .state <<< "$pr")" != open ]] || \
+             [[ "$(jq -r .head.sha <<< "$pr")" != "$SOURCE_SHA" ]]; then
+            echo 'Release PR changed or closed; leave its current description unchanged.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq --arg version "$PREVIEW_VERSION" --arg url "$ARTIFACT_URL" \
+            --arg days "$RETENTION_DAYS" --arg sha "$SOURCE_SHA" --arg trigger "$TRIGGER_PR" '
+            {body: (
+              "<!-- release-preview:start -->\n### Preview package\n\n" +
+              "**[Download preview package](" + $url + ")** - `" + $version + "`\n\n" +
+              "Download the ZIP and extract the `.nupkg` to test locally. " +
+              "Available for " + $days + " days from upload.\n\n" +
+              "Triggered by #" + $trigger + "; source commit: `" + $sha + "`.\n" +
+              "<!-- release-preview:end -->\n\n" +
+              ((.body // "") | sub("(?s)<!-- release-preview:start -->.*?<!-- release-preview:end -->\\n*"; ""))
+            )}' <<< "$pr" > preview-pr.json
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR" --input preview-pr.json > /dev/null
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
+          SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
+          PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
+          ARTIFACT_URL: ${{ needs.preview.outputs.artifact_url }}
+          RETENTION_DAYS: ${{ needs.preview.outputs.retention_days }}
+          TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+
       - name: Add preview download status to release PR commit
         run: |
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
