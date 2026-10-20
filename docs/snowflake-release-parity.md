@@ -25,3 +25,5 @@ A manual branch dispatch with `trigger_pr` naming a real merged code PR and `pub
 Alternatively, supply an existing `preview_pr` and `trigger_pr` to rebuild that release PR's preview without updating release state. Supply both `release_tag` and `release_sha` to stage a final package against an existing dedicated draft fixture; use `publish=false` for tests. The 0.0.900 draft is dedicated test data, not a NuGet release.
 
 Keep the `nuget-release` environment and deployment rules, `NUGET_USER`, release immutability, and the NuGet trusted publishing policy for `release.yml`. `RELEASE_PLEASE_TOKEN` manages release PRs and drafts. Preview builds have read-only repository access; a separate status job links their artifact from the release PR. Snowflake's workflows remain unchanged during this trial.
+
+Migration resets the manifest baseline to the last published release, 0.1.2; the old draft trials had advanced it to unpublished 0.3.0. Release Please calculates the next proposed version from the published baseline and updates the project version in its release PR.

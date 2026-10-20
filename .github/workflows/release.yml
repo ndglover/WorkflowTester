@@ -128,6 +128,7 @@ jobs:
           NEW_SHA: ${{ steps.release.outputs['src/WorkflowTester.Lib--sha'] }}
 
       - name: Maintain one release PR
+        id: release_pr
         if: ${{ steps.final.outputs.maintain_pr == 'true' && !inputs.preview_pr }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
@@ -142,10 +143,15 @@ jobs:
         if: ${{ steps.final.outputs.maintain_pr == 'true' }}
         run: |
           release_pr=$PREVIEW_PR
+          if [[ "$release_pr" == 0 && -n "$UPDATED_PR" ]]; then
+            release_pr=$(jq -er .number <<< "$UPDATED_PR")
+          fi
           if [[ "$release_pr" == 0 ]]; then
-            prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" \
-              --label 'autorelease: pending' --json number,headRefName)
-            prs=$(jq '[.[] | select(.headRefName | startswith("release-please--"))]' <<< "$prs")
+            # REST avoids the search-index delay immediately after PR creation.
+            prs=$(gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f base="$GITHUB_REF_NAME" -f per_page=100)
+            prs=$(jq '[.[][] | select((.head.ref | startswith("release-please--"))
+              and any(.labels[]; .name == "autorelease: pending"))]' <<< "$prs")
             test "$(jq length <<< "$prs")" -le 1
             release_pr=$(jq -r '.[0].number // 0' <<< "$prs")
           fi
@@ -177,6 +183,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
           TRIGGER_PR: ${{ inputs.trigger_pr || 0 }}
+          UPDATED_PR: ${{ steps.release_pr.outputs.pr }}
 
   preview:
     name: 2 - Build downloadable preview
