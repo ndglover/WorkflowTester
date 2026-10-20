@@ -20,13 +20,19 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional existing draft to prepare, e.g. dotnet/v0.1.3'
+        description: 'Existing draft to rebuild from its selected source (supply SHA too)'
         type: string
       release_sha:
-        description: 'Source SHA for the selected draft; supply both optional fields together'
+        description: 'Exact source SHA of the existing draft'
         type: string
+      preview_pr:
+        description: 'Existing release PR to build without changing release state (optional)'
+        type: number
+      trigger_pr:
+        description: 'Merged code PR number for a manual preview test (optional)'
+        type: number
       publish:
-        description: 'Publish after approval; disable to stage a candidate only'
+        description: 'Publish final package after approval; disable for staging tests'
         type: boolean
         default: true
 
@@ -35,31 +41,38 @@ permissions:
 
 jobs:
   plan:
-    name: 1 - Prepare release or refresh candidate
+    name: 1 - Update release PR or select final release
     runs-on: ubuntu-latest
     concurrency:
       group: release-plan-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     permissions:
       contents: write
-      actions: write
+      pull-requests: write
     outputs:
-      candidate: ${{ steps.plan.outputs.candidate }}
-      release_tag: ${{ steps.plan.outputs.release_tag }}
-      release_sha: ${{ steps.plan.outputs.release_sha }}
+      candidate: ${{ steps.final.outputs.candidate }}
+      release_tag: ${{ steps.final.outputs.release_tag }}
+      release_sha: ${{ steps.final.outputs.release_sha }}
+      preview_sha: ${{ steps.preview.outputs.source_sha }}
+      preview_version: ${{ steps.preview.outputs.version }}
+      preview_pr: ${{ steps.preview.outputs.release_pr }}
+      trigger_pr: ${{ steps.preview.outputs.trigger_pr }}
     steps:
-      - name: Validate optional source selection
+      - name: Validate manual source selection
         run: |
           if [[ -n "$RELEASE_TAG" || -n "$RELEASE_SHA" ]]; then
             [[ "$RELEASE_TAG" =~ ^dotnet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
             [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$PREVIEW_PR" = 0
           fi
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_SHA: ${{ inputs.release_sha }}
+          PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
 
       - name: Create draft from a merged release PR
-        if: ${{ inputs.release_tag == '' }}
+        id: release
+        if: ${{ github.ref_name == 'main' && inputs.release_tag == '' && !inputs.preview_pr }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -67,81 +80,189 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
 
-      - name: Decide the next stage
-        id: plan
+      - name: Select the final source or continue preparing previews
+        id: final
         run: |
-          source_sha=${RELEASE_SHA:-$GITHUB_SHA}
-          if [[ "$GITHUB_REF_NAME" == main ]] && \
-             [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" != "$source_sha" ]]; then
-            echo 'candidate=false' >> "$GITHUB_OUTPUT"
-            echo 'needs_pr=false' >> "$GITHUB_OUTPUT"
-            echo 'Superseded by a newer main commit. Use the newest pipeline run.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [[ -z "$RELEASE_TAG" ]]; then
-            version=$(gh api "repos/$GITHUB_REPOSITORY/contents/.release-please-manifest.json?ref=$source_sha" \
-              --jq .content | base64 --decode | jq -er '."src/WorkflowTester.Lib"')
-            RELEASE_TAG="dotnet/v$version"
-          fi
-          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-          info=$(jq -c --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)][0] // null' <<< "$releases")
-          if [[ "$info" == null ]] || [[ "$(jq -r .draft <<< "$info")" != true ]]; then
-            if [[ -n "$SELECTED_TAG" ]]; then
-              echo '::error::The selected release must be an existing draft.'
+          tag=${SELECTED_TAG:-$NEW_TAG}
+          source_sha=${SELECTED_SHA:-$NEW_SHA}
+          if [[ -n "$tag" ]]; then
+            info=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish,body)
+            test "$(jq -r .isDraft <<< "$info")" = true
+            test "$(jq -r .targetCommitish <<< "$info")" = "$source_sha"
+            if grep -Fq '<!-- publication-started -->' <<< "$(jq -r .body <<< "$info")"; then
+              echo '::error::Publication has started. Resume the original publication run.'
               exit 1
             fi
-            echo 'candidate=false' >> "$GITHUB_OUTPUT"
-            echo 'needs_pr=true' >> "$GITHUB_OUTPUT"
-            echo 'Stage: prepare or update the next version/changelog PR.' >> "$GITHUB_STEP_SUMMARY"
+            if [[ -n "$NEW_TAG" ]]; then
+              jq -r '.body + "\n\n<!-- release-pr-candidate -->"' <<< "$info" > release-notes.md
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
+            fi
+            echo 'candidate=true' >> "$GITHUB_OUTPUT"
+            echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "release_sha=$source_sha" >> "$GITHUB_OUTPUT"
+            echo 'maintain_pr=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          version=${RELEASE_TAG#dotnet/v}
-          code=$(curl -sS --retry 3 --head --output /dev/null --write-out '%{http_code}' \
-            "https://api.nuget.org/v3-flatcontainer/workflowtester.lib/$version/workflowtester.lib.$version.nupkg")
-          if grep -Fq '<!-- publication-started -->' <<< "$(jq -r .body <<< "$info")" || [[ "$code" == 200 ]]; then
-            echo 'candidate=false' >> "$GITHUB_OUTPUT"
-            echo 'needs_pr=false' >> "$GITHUB_OUTPUT"
-            echo 'Stage: publication has started. Resume the original release run; this version cannot be rebuilt.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          echo 'candidate=false' >> "$GITHUB_OUTPUT"
+          # Hold the selected release stable until it is published. In particular,
+          # do not rediscover the same commits while its GitHub release is a draft.
+          if [[ "$GITHUB_REF_NAME" == main && "$PREVIEW_PR" == 0 ]]; then
+            version=$(gh api "repos/$GITHUB_REPOSITORY/contents/.release-please-manifest.json?ref=$GITHUB_SHA" \
+              --jq .content | base64 --decode | jq -er '."src/WorkflowTester.Lib"')
+            releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+            if jq -e --arg tag "dotnet/v$version" \
+              'any(.[][]; .tag_name == $tag and .draft and (.body | contains("<!-- release-pr-candidate -->")))' \
+              <<< "$releases" > /dev/null; then
+              echo 'maintain_pr=false' >> "$GITHUB_OUTPUT"
+              echo 'The selected final release is awaiting publication. New code will enter the next release PR after publication.' >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
-          test "$code" = 404
-          echo 'candidate=true' >> "$GITHUB_OUTPUT"
-          echo 'needs_pr=false' >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_sha=$source_sha" >> "$GITHUB_OUTPUT"
-          printf 'Stage: build and refresh draft `%s` from `%s`.\n' "$RELEASE_TAG" "$source_sha" >> "$GITHUB_STEP_SUMMARY"
+          echo 'maintain_pr=true' >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
           SELECTED_TAG: ${{ inputs.release_tag }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          SELECTED_SHA: ${{ inputs.release_sha }}
+          PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
+          NEW_TAG: ${{ steps.release.outputs['src/WorkflowTester.Lib--tag_name'] }}
+          NEW_SHA: ${{ steps.release.outputs['src/WorkflowTester.Lib--sha'] }}
 
-      - name: Maintain the next release PR
-        if: ${{ steps.plan.outputs.needs_pr == 'true' }}
+      - name: Maintain one release PR
+        id: release_pr
+        if: ${{ steps.final.outputs.maintain_pr == 'true' && !inputs.preview_pr }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          target-branch: ${{ github.ref_name }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true
 
-      - name: Supersede older approvals for this workflow branch
-        if: ${{ steps.plan.outputs.candidate == 'true' }}
+      - name: Select release-PR source and merged-PR preview version
+        id: preview
+        if: ${{ steps.final.outputs.maintain_pr == 'true' }}
         run: |
-          branch=${GITHUB_REF_NAME//\//%2F}
-          waiting=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?status=waiting&branch=$branch&per_page=100" \
-            --jq '.workflow_runs[].id')
-          for run_id in $waiting; do
-            if [[ "$run_id" != "$GITHUB_RUN_ID" ]]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/cancel" \
-                || echo "::warning::Run $run_id changed state before it could be superseded."
-            fi
-          done
+          release_pr=$PREVIEW_PR
+          if [[ "$release_pr" == 0 && -n "$UPDATED_PR" ]]; then
+            release_pr=$(jq -er .number <<< "$UPDATED_PR")
+          fi
+          if [[ "$release_pr" == 0 ]]; then
+            # REST avoids the search-index delay immediately after PR creation.
+            prs=$(gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f base="$GITHUB_REF_NAME" -f per_page=100)
+            prs=$(jq '[.[][] | select((.head.ref | startswith("release-please--"))
+              and any(.labels[]; .name == "autorelease: pending"))]' <<< "$prs")
+            test "$(jq length <<< "$prs")" -le 1
+            release_pr=$(jq -r '.[0].number // 0' <<< "$prs")
+          fi
+          if [[ "$release_pr" == 0 ]]; then
+            echo 'No releasable changes; no preview required.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pr=$(gh pr view "$release_pr" --repo "$GITHUB_REPOSITORY" --json state,headRefOid,headRefName,isCrossRepository)
+          test "$(jq -r .state <<< "$pr")" = OPEN
+          test "$(jq -r .isCrossRepository <<< "$pr")" = false
+          [[ "$(jq -r .headRefName <<< "$pr")" == release-please--* ]]
+          source_sha=$(jq -r .headRefOid <<< "$pr")
+          version=$(gh api "repos/$GITHUB_REPOSITORY/contents/.release-please-manifest.json?ref=$source_sha" \
+            --jq .content | base64 --decode | jq -er '."src/WorkflowTester.Lib"')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          trigger_pr=$TRIGGER_PR
+          if [[ "$trigger_pr" == 0 ]]; then
+            trigger_pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              --jq '[.[] | select(.merged_at != null)][0].number // 0')
+          fi
+          [[ "$trigger_pr" =~ ^[1-9][0-9]*$ ]]
+          # Explicit manual tests must also identify a real merged code PR.
+          gh pr view "$trigger_pr" --repo "$GITHUB_REPOSITORY" --json state --jq .state | grep -qx MERGED
+          echo "version=$version-preview.$trigger_pr" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
+          echo "trigger_pr=$trigger_pr" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
+          TRIGGER_PR: ${{ inputs.trigger_pr || 0 }}
+          UPDATED_PR: ${{ steps.release_pr.outputs.pr }}
+
+  preview:
+    name: 2 - Build downloadable preview
+    needs: plan
+    if: ${{ needs.plan.outputs.preview_sha != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_url: ${{ steps.upload.outputs.artifact-url }}
+    steps:
+      - name: Validate preview retention
+        id: settings
+        run: |
+          [[ "$RETENTION_DAYS" =~ ^[1-9][0-9]*$ ]]
+          test "$RETENTION_DAYS" -le 90
+          echo "retention_days=$RETENTION_DAYS" >> "$GITHUB_OUTPUT"
+        env:
+          RETENTION_DAYS: ${{ vars.PREVIEW_RETENTION_DAYS || 28 }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.preview_sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Pack preview and record its source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(dotnet msbuild src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -getProperty:VersionPrefix)" = "${PREVIEW_VERSION%-preview.*}"
+          dotnet pack src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -c Release -o artifacts \
+            -p:Version="$PREVIEW_VERSION" -p:PackageVersion="$PREVIEW_VERSION"
+          jq -n --arg version "$PREVIEW_VERSION" --arg sha "$SOURCE_SHA" \
+            --argjson release_pr "$RELEASE_PR" --argjson trigger_pr "$TRIGGER_PR" \
+            '{version:$version,source_sha:$sha,release_pr:$release_pr,trigger_pr:$trigger_pr}' > artifacts/preview-source.json
+        env:
+          PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
+          SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
+          RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
+          TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: preview-${{ needs.plan.outputs.preview_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: ${{ steps.settings.outputs.retention_days }}
+      - name: Show preview download
+        run: |
+          printf '[Download %s](%s) — retained for %s days.\n\nSource: `%s`; triggering PR: #%s; release PR: #%s.\n' \
+            "$PREVIEW_VERSION" "$ARTIFACT_URL" "$RETENTION_DAYS" "$SOURCE_SHA" "$TRIGGER_PR" "$RELEASE_PR" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          RETENTION_DAYS: ${{ steps.settings.outputs.retention_days }}
+          SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
+          TRIGGER_PR: ${{ needs.plan.outputs.trigger_pr }}
+          RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
+
+  preview_link:
+    name: Link preview from release PR
+    needs: [plan, preview]
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Add preview download status to release PR commit
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
+            -f state=success -f context='Release preview package' \
+            -f description="$PREVIEW_VERSION available for testing" -f target_url="$ARTIFACT_URL"
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.plan.outputs.preview_sha }}
+          PREVIEW_VERSION: ${{ needs.plan.outputs.preview_version }}
+          ARTIFACT_URL: ${{ needs.preview.outputs.artifact_url }}
 
   pack:
-    name: 2 - Build candidate
+    name: 3 - Build final package
     needs: plan
     if: ${{ needs.plan.outputs.candidate == 'true' }}
     runs-on: ubuntu-latest
@@ -188,7 +309,7 @@ jobs:
           if-no-files-found: error
 
   prepare_candidate:
-    name: 3 - Stage candidate for testing
+    name: 4 - Stage final package for approval
     concurrency:
       group: candidate-${{ github.repository }}-${{ needs.plan.outputs.release_tag }}
       cancel-in-progress: false
@@ -211,16 +332,15 @@ jobs:
             echo '::error::Publication has started; resume its original run instead of replacing this candidate.'
             exit 1
           fi
-          if [[ "$GITHUB_REF_NAME" == main ]]; then
-            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$RELEASE_SHA"
-          fi
           previous_tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
             --jq '[.[] | select((.isDraft | not) and (.tagName | startswith("dotnet/v")))][0].tagName // empty')
           notes_args=(-f tag_name="$RELEASE_TAG" -f target_commitish="$RELEASE_SHA")
           if [[ -n "$previous_tag" ]]; then notes_args+=(-f previous_tag_name="$previous_tag"); fi
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${notes_args[@]}" \
             --jq .body > release-notes.md
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --notes-file release-notes.md
+          printf '\n\n<!-- release-pr-candidate -->\n' >> release-notes.md
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
           test "$BUILT_SHA" = "$RELEASE_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -346,22 +466,18 @@ jobs:
           PACKAGE_NAME: ${{ steps.candidate.outputs.package_name }}
           PACKAGE_SHA256: ${{ steps.candidate.outputs.package_sha256 }}
 
-      - name: Confirm this candidate is still current
+      - name: Confirm selected release source
         id: fresh
         run: |
-          if [[ "$GITHUB_REF_NAME" == main ]] && \
-             [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" != "$RELEASE_SHA" ]]; then
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo 'A newer commit arrived during preparation. Its run will replace this candidate.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          fi
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
 
   publish_nuget:
-    name: 4 - Approve and publish to NuGet
+    name: 5 - Approve and publish to NuGet
     concurrency:
       group: candidate-${{ github.repository }}-${{ needs.plan.outputs.release_tag }}
       cancel-in-progress: false
@@ -450,7 +566,7 @@ jobs:
         run: |
           body=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
           if ! grep -Fq '<!-- publication-started -->' <<< "$body"; then
-            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$RELEASE_SHA"
+            test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
             printf '%s\n\n<!-- publication-started -->\n' "$body" > publication-notes.md
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file publication-notes.md
           fi
@@ -471,11 +587,12 @@ jobs:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
 
   publish_release:
-    name: 5 - Publish GitHub release
+    name: 6 - Publish GitHub release
     needs: [plan, publish_nuget, pack]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     steps:
       - name: Verify existing release tag
         run: |
@@ -509,3 +626,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+
+      - name: Prepare the next release cycle
+        if: ${{ github.ref_name == 'main' }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish=false
+        env:
+          GH_TOKEN: ${{ github.token }}

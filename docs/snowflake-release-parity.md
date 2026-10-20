@@ -1,31 +1,29 @@
-# Single release pipeline trial
+# Release PR previews and final publication
 
-WorkflowTester uses one release workflow, release.yml. It runs on relevant pushes to main or manual dispatch. The separate Release Please workflow has been removed.
+WorkflowTester uses one workflow, `.github/workflows/release.yml`, with standard Release Please actions and shell steps. It does not require the custom candidate-version `.cjs` helper proposed in PR #16.
 
-## Visible stages
+## Before the release PR is merged
 
-1. Prepare release or refresh candidate: process a merged release PR, or maintain the next version/changelog PR if no current draft exists. When the current version is still a draft, select the newest source and refresh that candidate instead of proposing another version.
-2. Build candidate: check out the exact planned SHA, check the version, build the package once, and save it as a workflow artifact. Build permissions remain read-only.
-3. Stage candidate for testing: update the draft target and generated release notes; attest the actual package source; attach the package and provenance; download and verify them. The summary links to the draft and shows source SHA and digest.
-4. Approve and publish to NuGet: wait for the existing nuget-release approval; verify the source, digest, and signed provenance; freeze the candidate; authenticate with OIDC and push that same package.
-5. Publish GitHub release: publish the draft, locking its assets and tag when repository immutability is enabled.
+Each relevant code PR merged into main updates the single Release Please PR, including its version and changelog. Build the preview from that release PR's exact head commit, so its version files and proposed code match. For example, merging code PR #15 can produce `1.0.0-preview.15`. The suffix identifies the triggering code PR, not the release PR. Rerunning the same source retains that package version; each workflow attempt has a separate artifact name.
 
-## Refresh and approval
+Previews are GitHub Actions artifacts, never NuGet.org publications or GitHub release assets. They contain the nupkg, symbols, and `preview-source.json` recording the release PR, triggering code PR and exact source SHA. The release PR's `Release preview package` status links to the download, and the workflow summary includes the same link.
 
-A new relevant push while the candidate remains unpublished replaces the draft candidate with a new package, source SHA, release notes, and provenance. The previous waiting approval is superseded. Plan jobs are serialised; draft mutation and NuGet publication share a candidate lock. Superseded source checks prevent old runs from publishing stale candidates.
+Repository Actions variable `PREVIEW_RETENTION_DAYS` configures preview retention. The default is 28 days when unset. For this public repository the value must be a whole number from 1 to 90, within repository/organization retention limits. Retention starts at upload; changing the variable affects subsequent uploads. There is no automatic custom cleanup job.
 
-The publishing job marks publication started before contacting NuGet. Once that marker is set, or the version is found on NuGet, preparation stops rebuilding that version. Resume the original run after a partial publication failure. Subsequent code changes need the next version after this release is finished.
+## After the release PR is merged
 
-Do not use cancel-in-progress on the whole workflow: that could interrupt a package upload. Automatic supersession targets runs waiting for approval. If approval and supersession cross, the publication marker retains the frozen candidate for recovery.
+Release Please creates the draft final release and selects the merged release commit. Build its final version separately, without a preview suffix. Attach that nupkg and signed provenance to the draft before waiting for the `nuget-release` approval. After approval, download and verify that same final asset, push it to NuGet, and publish the GitHub release. Published release assets are permanent under release immutability; preview artifact retention does not apply to them.
 
-## Manual branch tests
+New code merged while final publication is waiting cannot change the selected final source, version or approval. After successful final publication, the workflow dispatches a preparation-only main run to maintain the next release PR, including code accumulated during that wait. That follow-up run does not dispatch another run unless it subsequently publishes a final release. This guard prevents duplicate release PRs against an unpublished draft. Drafts managed by this flow carry `<!-- release-pr-candidate -->` in their notes. Older trial drafts without that marker are not treated as this flow's pending final release.
 
-Supply an existing draft release_tag and matching project-version release_sha, and set publish=false. This runs planning, build and staging without either publication job. Supply both fields together. With no explicit tag, the workflow operates on the current main release state.
+The publication marker `<!-- publication-started -->` preserves the existing partial-publication recovery rule: resume the original run after publication starts. Do not cancel the whole workflow when new code arrives.
 
-The 0.0.900 draft and fixture branch are dedicated test data. They are not NuGet releases. Normal selection follows the manifest version rather than these test fixtures.
+## Branch integration tests
 
-## Setup retained
+A manual branch dispatch with `trigger_pr` naming a real merged code PR and `publish=false` uses Release Please against that branch, maintaining a dedicated test release PR and building a preview. It does not create a final GitHub release or publish to NuGet. A later dispatch should update the same test release PR.
 
-Keep release immutability, the nuget-release environment and main deployment rule, NUGET_USER, and the NuGet trusted-publishing policy for release.yml. RELEASE_PLEASE_TOKEN manages release PRs and exposes drafts to the planning job. The built-in token is used for candidate attachment, attestations, publication, and superseding old waiting runs.
+Alternatively, supply an existing `preview_pr` and `trigger_pr` to rebuild that release PR's preview without updating release state. Supply both `release_tag` and `release_sha` to stage a final package against an existing dedicated draft fixture; use `publish=false` for tests. The 0.0.900 draft is dedicated test data, not a NuGet release.
 
-The separate Publish Preview workflow and its preview-only MinVer settings have been removed. Download candidate packages from the draft GitHub release for testing. Snowflake's workflows are unchanged pending review of this trial.
+Keep the `nuget-release` environment and deployment rules, `NUGET_USER`, release immutability, and the NuGet trusted publishing policy for `release.yml`. `RELEASE_PLEASE_TOKEN` manages release PRs and drafts. Preview builds have read-only repository access; a separate status job links their artifact from the release PR. Snowflake's workflows remain unchanged during this trial.
+
+Migration resets the manifest baseline to the last published release, 0.1.2; the old draft trials had advanced it to unpublished 0.3.0. Release Please calculates the next proposed version from the published baseline and updates the project version in its release PR.
