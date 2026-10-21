@@ -6,8 +6,8 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 # See the License for the specific language governing permissions and limitations.
 
-name: Release pipeline
-run-name: Release pipeline - ${{ inputs.release_tag || github.ref_name }}
+name: .NET Release
+run-name: .NET Release - ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
@@ -42,7 +42,7 @@ permissions:
 
 jobs:
   plan:
-    name: 1 - Update release PR or select final release
+    name: Prepare release
     runs-on: ubuntu-latest
     concurrency:
       group: release-plan-${{ github.repository }}-${{ github.ref }}
@@ -62,7 +62,7 @@ jobs:
       trigger_pr: ${{ steps.preview.outputs.trigger_pr }}
       trigger_sha: ${{ steps.preview.outputs.trigger_sha }}
     steps:
-      - name: Validate manual source selection
+      - name: Validate manual release inputs
         run: |
           if [[ -n "$RELEASE_TAG" || -n "$RELEASE_SHA" ]]; then
             [[ "$RELEASE_TAG" =~ ^dotnet/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -74,7 +74,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           PREVIEW_PR: ${{ inputs.preview_pr || 0 }}
 
-      - name: Create draft from a merged release PR
+      - name: Create draft release from merged release PR
         id: release
         if: ${{ github.ref_name == 'main' && inputs.release_tag == '' && !inputs.preview_pr }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
@@ -84,7 +84,7 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
 
-      - name: Select the final source or continue preparing previews
+      - name: Select release stage
         id: final
         run: |
           tag=${SELECTED_TAG:-$NEW_TAG}
@@ -140,7 +140,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Show final package build on release PR
+      - name: Update release PR build status
         if: ${{ steps.final.outputs.release_pr != '' }}
         uses: ./.github/actions/release-pr-progress
         with:
@@ -151,7 +151,7 @@ jobs:
           source-sha: ${{ steps.final.outputs.release_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      - name: Maintain one release PR
+      - name: Update release PR
         id: release_pr
         if: ${{ steps.final.outputs.maintain_pr == 'true' && !inputs.preview_pr }}
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
@@ -162,7 +162,7 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-release: true
 
-      - name: Select release-PR source and merged-PR preview version
+      - name: Select preview source and version
         id: preview
         if: ${{ steps.final.outputs.maintain_pr == 'true' }}
         run: |
@@ -222,7 +222,7 @@ jobs:
           UPDATED_PR: ${{ steps.release_pr.outputs.pr }}
 
   preview:
-    name: 2 - Build downloadable preview
+    name: Build preview package
     needs: plan
     if: ${{ needs.plan.outputs.preview_sha != '' }}
     runs-on: ubuntu-latest
@@ -247,7 +247,7 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '8.0.x'
-      - name: Pack preview and record its source
+      - name: Build preview package and record source
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(dotnet msbuild src/WorkflowTester.Lib/WorkflowTester.Lib.csproj -getProperty:VersionPrefix)" = "${PREVIEW_VERSION%-preview.*}"
@@ -269,7 +269,7 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: ${{ steps.settings.outputs.retention_days }}
-      - name: Show preview download
+      - name: Show preview package download
         run: |
           {
             printf '[Download %s](%s) — retained for %s days.\n\nSource: `%s`; release PR: #%s.\n' \
@@ -290,7 +290,7 @@ jobs:
           RELEASE_PR: ${{ needs.plan.outputs.preview_pr }}
 
   preview_link:
-    name: Link preview from release PR
+    name: Update preview details
     needs: [plan, preview]
     runs-on: ubuntu-latest
     concurrency:
@@ -304,7 +304,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Show preview and next action on release PR
+      - name: Update preview details on release PR
         uses: ./.github/actions/release-pr-progress
         with:
           token: ${{ github.token }}
@@ -318,7 +318,7 @@ jobs:
           trigger-sha: ${{ needs.plan.outputs.trigger_sha }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      - name: Add preview download status to release PR commit
+      - name: Link preview package from commit status
         run: |
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
             -f state=success -f context='Release preview package' \
@@ -330,7 +330,7 @@ jobs:
           ARTIFACT_URL: ${{ needs.preview.outputs.artifact_url }}
 
   pack:
-    name: 3 - Build final package
+    name: Build release packages
     needs: plan
     if: ${{ needs.plan.outputs.candidate == 'true' }}
     runs-on: ubuntu-latest
@@ -358,7 +358,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Pack matching release version
+      - name: Build release packages for selected version
         id: package
         run: |
           source_sha=$(git rev-parse HEAD)
@@ -386,7 +386,7 @@ jobs:
           if-no-files-found: error
 
   prepare_candidate:
-    name: 4 - Stage final package for approval
+    name: Prepare draft release
     concurrency:
       group: candidate-${{ github.repository }}-${{ needs.plan.outputs.release_tag }}
       cancel-in-progress: false
@@ -404,7 +404,7 @@ jobs:
       attestations: write
       pull-requests: write
     steps:
-      - name: Refresh draft source and release notes
+      - name: Update draft release notes
         run: |
           info=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,body)
           test "$(jq -r .isDraft <<< "$info")" = true
@@ -427,7 +427,7 @@ jobs:
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
-      - name: Verify existing release tag
+      - name: Verify release tag
         run: |
           tag_ref="refs/tags/$RELEASE_TAG"
           if tag_refs=$(git ls-remote --exit-code --tags \
@@ -465,7 +465,7 @@ jobs:
       - uses: actions/attest-build-provenance/predicate@1176ef556905f349f669722abf30bce1a6e16e01 # predicate@1.1.5
         id: workflow_provenance
 
-      - name: Record actual package source in provenance
+      - name: Record release package source in provenance
         run: |
           test "$BUILT_SHA" = "$RELEASE_SHA"
           jq --arg source_sha "$BUILT_SHA" \
@@ -493,7 +493,7 @@ jobs:
           predicate-type: 'https://slsa.dev/provenance/v1'
           predicate-path: 'artifacts/release-provenance.json'
 
-      - name: Verify attested package source
+      - name: Verify release package provenance
         run: |
           jq -r '.dsseEnvelope.payload' "$BUNDLE_PATH" | base64 --decode \
             | jq -e --arg sha "$BUILT_SHA" \
@@ -507,7 +507,7 @@ jobs:
           BUNDLE_PATH: ${{ steps.release_provenance.outputs.bundle-path }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
-      - name: Attach candidate and provenance to draft
+      - name: Attach release packages and provenance
         id: candidate
         run: |
           packages=(artifacts/*.nupkg)
@@ -530,7 +530,7 @@ jobs:
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           BUNDLE_PATH: ${{ steps.release_provenance.outputs.bundle-path }}
 
-      - name: Verify downloadable candidate and show review details
+      - name: Verify release packages and show review details
         run: |
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern "$PACKAGE_NAME" --pattern "$SYMBOL_NAME" --pattern release-attestation.sigstore.json --dir staged
@@ -558,7 +558,7 @@ jobs:
           SYMBOL_NAME: ${{ steps.candidate.outputs.symbol_name }}
           SYMBOL_SHA256: ${{ steps.candidate.outputs.symbol_sha256 }}
 
-      - name: Confirm selected release source
+      - name: Verify selected release source
         id: fresh
         run: |
           test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
@@ -572,7 +572,7 @@ jobs:
         if: ${{ needs.plan.outputs.release_pr != '' }}
         with:
           persist-credentials: false
-      - name: Show final package and publication approval on release PR
+      - name: Update release PR approval instructions
         if: ${{ needs.plan.outputs.release_pr != '' }}
         uses: ./.github/actions/release-pr-progress
         with:
@@ -585,7 +585,7 @@ jobs:
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   publish_nuget:
-    name: 5 - Approve and publish to NuGet
+    name: Approve and publish NuGet packages
     concurrency:
       group: candidate-${{ github.repository }}-${{ needs.plan.outputs.release_tag }}
       cancel-in-progress: false
@@ -598,7 +598,7 @@ jobs:
       id-token: write
     steps:
       # Draft releases require push access to see; keep this in the write-enabled job.
-      - name: Verify draft release and source commit
+      - name: Verify draft release and package source
         run: |
           release_info=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')
@@ -621,7 +621,7 @@ jobs:
           RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
-      - name: Verify existing release tag
+      - name: Verify release tag
         run: |
           tag_ref="refs/tags/$RELEASE_TAG"
           if tag_refs=$(git ls-remote --exit-code --tags \
@@ -648,7 +648,7 @@ jobs:
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
-      - name: Download and verify the reviewed candidate
+      - name: Download and verify approved release packages
         run: |
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern "$PACKAGE_NAME" --pattern "$SYMBOL_NAME" --pattern release-attestation.sigstore.json --dir artifacts
@@ -675,7 +675,7 @@ jobs:
           SYMBOL_NAME: ${{ needs.prepare_candidate.outputs.symbol_name }}
           SYMBOL_SHA256: ${{ needs.prepare_candidate.outputs.symbol_sha256 }}
 
-      - name: Freeze the approved candidate before publication
+      - name: Freeze approved release packages
         run: |
           body=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
           if ! grep -Fq '<!-- publication-started -->' <<< "$body"; then
@@ -695,7 +695,7 @@ jobs:
           # Package ownership is selected separately in that policy.
           user: ${{ vars.NUGET_USER }}
 
-      - name: Publish main package and symbols
+      - name: Publish NuGet package and symbols
         run: |
           # Explicit pushes ensure a retry still publishes symbols if the main
           # package succeeded in a previous attempt.
@@ -707,14 +707,14 @@ jobs:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
 
   publish_release:
-    name: 6 - Publish GitHub release
+    name: Publish GitHub release
     needs: [plan, publish_nuget, pack]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: write
     steps:
-      - name: Verify existing release tag
+      - name: Verify release tag
         run: |
           tag_ref="refs/tags/$RELEASE_TAG"
           if tag_refs=$(git ls-remote --exit-code --tags \
@@ -741,20 +741,20 @@ jobs:
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
           BUILT_SHA: ${{ needs.pack.outputs.source_sha }}
 
-      - name: Publish immutable release
+      - name: Publish GitHub release
         run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
 
-      - name: Prepare the next release cycle
+      - name: Start next release preparation
         if: ${{ github.ref_name == 'main' }}
         run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish=false
         env:
           GH_TOKEN: ${{ github.token }}
 
   release_progress:
-    name: Update release PR outcome
+    name: Update release PR status
     if: ${{ always() && needs.plan.outputs.candidate == 'true' && needs.plan.outputs.release_pr != '' }}
     needs: [plan, pack, prepare_candidate, publish_nuget, publish_release]
     runs-on: ubuntu-latest
@@ -765,7 +765,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Determine actual release outcome
+      - name: Check publication result
         id: outcome
         run: |
           is_draft=true
@@ -787,7 +787,7 @@ jobs:
           STAGING_RESULT: ${{ needs.prepare_candidate.result }}
           NUGET_RESULT: ${{ needs.publish_nuget.result }}
           PUBLISH_ENABLED: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
-      - name: Show published release or recovery action on release PR
+      - name: Update release PR status
         uses: ./.github/actions/release-pr-progress
         with:
           token: ${{ github.token }}
