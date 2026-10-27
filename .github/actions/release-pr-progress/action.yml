@@ -28,6 +28,9 @@ inputs:
   trigger-pr:
     default: ''
     description: Merged code PR that triggered the preview
+  trigger-sha:
+    default: ''
+    description: Commit that triggered the preview
   dry-run:
     default: 'false'
     description: Render the panel without reading or changing a PR
@@ -49,6 +52,7 @@ runs:
         PROGRESS_RUN: ${{ inputs.run-url }}
         PROGRESS_DAYS: ${{ inputs.retention-days }}
         PROGRESS_TRIGGER: ${{ inputs.trigger-pr }}
+        PROGRESS_TRIGGER_SHA: ${{ inputs.trigger-sha }}
         PROGRESS_DRY_RUN: ${{ inputs.dry-run }}
       with:
         github-token: ${{ inputs.token }}
@@ -69,7 +73,9 @@ runs:
           if (stage === 'preview') {
             lines.push(download, '', `Extract the ZIP to use the \`.nupkg\`. Available for ${e.PROGRESS_DAYS} days from upload.`, '',
               '**Next:** Test the preview, then review and merge this release PR when ready. Merging builds the final package; a separate publication approval follows.', '',
-              `Triggered by #${e.PROGRESS_TRIGGER}.`);
+              e.PROGRESS_TRIGGER && e.PROGRESS_TRIGGER !== '0'
+                ? `Triggered by #${e.PROGRESS_TRIGGER}.`
+                : `Triggered by commit [${(e.PROGRESS_TRIGGER_SHA || '').slice(0, 7)}](${repo}/commit/${e.PROGRESS_TRIGGER_SHA}).`);
           } else if (stage === 'building') {
             lines.push('This release PR has been merged. The final package is being built and verified.', '',
               `**Next:** ${run}. Wait for the package to be staged and publication approval to become available.`);
