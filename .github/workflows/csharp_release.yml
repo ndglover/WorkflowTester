@@ -6,8 +6,8 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 # See the License for the specific language governing permissions and limitations.
 
-name: .NET Release
-run-name: .NET Release - ${{ inputs.release_tag || github.ref_name }}
+name: CSharp Release
+run-name: CSharp Release - ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
@@ -16,7 +16,7 @@ on:
       - 'src/WorkflowTester.Lib/**'
       - 'Directory.Build.props'
       - 'release-please-config.json'
-      - '.github/workflows/release.yml'
+      - '.github/workflows/csharp_release.yml'
       - '.github/actions/release-pr-progress/**'
   workflow_dispatch:
     inputs:
@@ -539,7 +539,7 @@ jobs:
           for package in "$PACKAGE_NAME" "$SYMBOL_NAME"; do
             gh attestation verify "staged/$package" --repo "$GITHUB_REPOSITORY" \
               --bundle staged/release-attestation.sigstore.json \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/csharp_release.yml"
           done
           release_url=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
           {
@@ -657,7 +657,7 @@ jobs:
           for package in "$PACKAGE_NAME" "$SYMBOL_NAME"; do
             gh attestation verify "artifacts/$package" --repo "$GITHUB_REPOSITORY" \
               --bundle artifacts/release-attestation.sigstore.json \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/csharp_release.yml"
           done
           jq -r '.dsseEnvelope.payload' artifacts/release-attestation.sigstore.json | base64 --decode \
             | jq -e --arg sha "$BUILT_SHA" \
@@ -749,7 +749,7 @@ jobs:
 
       - name: Start next release preparation
         if: ${{ github.ref_name == 'main' }}
-        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish=false
+        run: gh workflow run csharp_release.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish=false
         env:
           GH_TOKEN: ${{ github.token }}
 
