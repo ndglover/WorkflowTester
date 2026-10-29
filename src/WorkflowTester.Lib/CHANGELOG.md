@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/ndglover/WorkflowTester/compare/dotnet/v2.0.0...dotnet/v2.0.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* update greeting ([#32](https://github.com/ndglover/WorkflowTester/issues/32)) ([927ddf5](https://github.com/ndglover/WorkflowTester/commit/927ddf5a758d92f8d931968f27721da9225ce10a))
+
 ## [2.0.0](https://github.com/ndglover/WorkflowTester/compare/dotnet/v1.0.0...dotnet/v2.0.0) (2026-10-20)
 
 
