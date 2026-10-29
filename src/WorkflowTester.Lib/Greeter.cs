@@ -2,5 +2,5 @@ namespace WorkflowTester.Lib;
 
 public class Greeter
 {
-    public string Greet(string name) => $"Hello again, csharp!, {name.Trim()}!";
+    public string Greet(string name) => $"Hello again, csharp convention!, {name.Trim()}!";
 }
