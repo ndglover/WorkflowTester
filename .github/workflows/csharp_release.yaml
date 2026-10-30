@@ -593,10 +593,17 @@ jobs:
     needs: [plan, pack, prepare_candidate]
     runs-on: ubuntu-latest
     environment: nuget-release
+    env:
+      DOTNET_CLI_UI_LANGUAGE: en-US
     permissions:
       contents: write
       id-token: write
     steps:
+      - name: Set up .NET for NuGet verification
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.x'
+
       # Draft releases require push access to see; keep this in the write-enabled job.
       - name: Verify draft release and package source
         run: |
@@ -695,12 +702,44 @@ jobs:
           # Package ownership is selected separately in that policy.
           user: ${{ vars.NUGET_USER }}
 
-      - name: Publish NuGet package and symbols
+      - name: Publish NuGet package
         run: |
-          # Explicit pushes ensure a retry still publishes symbols if the main
-          # package succeeded in a previous attempt.
           dotnet nuget push "artifacts/*.nupkg" --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+
+      - name: Verify published NuGet package matches approved package
+        shell: bash
+        run: |
+          # Verify after every push, including skipped duplicates, to cover races
+          # with another publisher. NuGet's repository signature changes ZIP bytes.
+          expected_hash=$(openssl dgst -sha512 -binary "artifacts/$PACKAGE_NAME" | openssl base64 -A)
+          base_address=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            https://api.nuget.org/v3/index.json \
+            | jq -er '[.resources[] | select(."@type" == "PackageBaseAddress/3.0.0") | ."@id"][0] | select(type == "string" and startswith("https://"))')
+          version=${RELEASE_VERSION,,}
+          package_url="${base_address%/}/workflowtester.lib/$version/workflowtester.lib.$version.nupkg"
+          mkdir -p published
+          # New uploads may not be downloadable immediately. Exhaustion fails closed.
+          curl --fail --silent --show-error --retry 12 --retry-delay 10 --retry-max-time 180 \
+            --retry-all-errors --connect-timeout 10 --max-time 30 \
+            --output published/package.nupkg "$package_url"
+          dotnet nuget verify published/package.nupkg --all --verbosity normal | tee published/verification.log
+          mapfile -t content_hashes < <(sed -n 's/^Content hash: //p' published/verification.log | tr -d '\r')
+          test "${#content_hashes[@]}" -eq 1
+          if [[ "${content_hashes[0]}" != "$expected_hash" ]]; then
+            echo '::error::Published NuGet package does not match the approved package. GitHub publication stopped.'
+            exit 1
+          fi
+          echo 'Published NuGet package matches the approved package (repository signing accounted for).' >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PACKAGE_NAME: ${{ needs.prepare_candidate.outputs.package_name }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+
+      - name: Publish NuGet symbols
+        run: |
+          # Explicit symbol push still runs when the main package was a duplicate.
           dotnet nuget push "artifacts/*.snupkg" --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json --skip-duplicate
         env:
